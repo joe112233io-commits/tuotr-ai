@@ -289,28 +289,109 @@ export const AIProvider = {
     const { instruction, onChunk, stopSequences, temperature } = opts;
     const s = this.settings;
 
-    const resp = await fetch("/api/ai/generate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        instruction,
-        model: s.enabled ? s.model : undefined,
-        customApiKey: s.enabled ? s.apiKey : undefined,
-        customBaseUrl: s.enabled ? s.baseUrl : undefined,
-        providerType: s.enabled ? this.presetType() : undefined,
-        stopSequences,
-        temperature: typeof temperature === "number" ? temperature : s.temperature ?? 0.2,
-      }),
-    });
+    const safeFetchJson = async (resp: Response): Promise<any> => {
+      const rawText = await resp.text();
+      try {
+        return JSON.parse(rawText);
+      } catch (err) {
+        if (rawText.includes("<!DOCTYPE") || rawText.includes("<html") || rawText.includes("The page")) {
+          throw new Error("Server proxy or static deployment returned an HTML 404 page instead of a JSON response. Please check your Base URL settings.");
+        }
+        throw new Error(`Invalid JSON response (HTTP ${resp.status}): ${rawText.slice(0, 100)}`);
+      }
+    };
 
-    if (!resp.ok) {
-      const data = await resp.json().catch(() => ({}));
-      const msg = data.error || `HTTP ${resp.status} - AI Generation Error`;
-      throw new Error(msg);
+    const directFetch = async (): Promise<string> => {
+      if (!s.baseUrl) throw new Error("No Base URL provided.");
+      let cleanBase = String(s.baseUrl).trim().replace(/\/+$/, "");
+      cleanBase = cleanBase.replace(/\/chat\/completions$/, "").replace(/\/messages$/, "");
+
+      const isAnthropic = this.presetType() === "anthropic";
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://tutorai.me",
+        "X-Title": "TutorAI",
+      };
+      if (s.apiKey) {
+        if (isAnthropic) {
+          headers["x-api-key"] = s.apiKey;
+          headers["anthropic-version"] = "2023-06-01";
+          headers["anthropic-dangerous-direct-browser-access"] = "true";
+        } else {
+          headers["Authorization"] = `Bearer ${s.apiKey}`;
+        }
+      }
+
+      const endpoint = isAnthropic ? `${cleanBase}/messages` : `${cleanBase}/chat/completions`;
+      const bodyPayload = isAnthropic
+        ? {
+            model: s.model || "claude-3-5-sonnet-20241022",
+            max_tokens: 4000,
+            temperature: typeof temperature === "number" ? temperature : s.temperature ?? 0.2,
+            messages: [{ role: "user", content: instruction }],
+            stop_sequences: stopSequences || undefined,
+          }
+        : {
+            model: s.model || "gpt-4o-mini",
+            temperature: typeof temperature === "number" ? temperature : s.temperature ?? 0.2,
+            messages: [{ role: "user", content: instruction }],
+            stop: stopSequences || undefined,
+          };
+
+      const resp = await fetch(endpoint, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(bodyPayload),
+      });
+
+      const data = await safeFetchJson(resp);
+      if (!resp.ok) {
+        throw new Error(data.error?.message || data.message || `Provider HTTP ${resp.status}`);
+      }
+
+      const text = isAnthropic ? data?.content?.[0]?.text : data?.choices?.[0]?.message?.content;
+      if (typeof text !== "string" || !text.trim()) {
+        throw new Error("Custom provider returned empty content.");
+      }
+      return text;
+    };
+
+    let text = "";
+    try {
+      const resp = await fetch("/api/ai/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          instruction,
+          model: s.enabled ? s.model : undefined,
+          customApiKey: s.enabled ? s.apiKey : undefined,
+          customBaseUrl: s.enabled ? s.baseUrl : undefined,
+          providerType: s.enabled ? this.presetType() : undefined,
+          stopSequences,
+          temperature: typeof temperature === "number" ? temperature : s.temperature ?? 0.2,
+        }),
+      });
+
+      if (!resp.ok) {
+        const data = await safeFetchJson(resp).catch(() => ({}));
+        if (s.enabled && s.baseUrl) {
+          text = await directFetch();
+        } else {
+          const msg = data.error || `HTTP ${resp.status} - AI Generation Error`;
+          throw new Error(msg);
+        }
+      } else {
+        const data = await safeFetchJson(resp);
+        text = data?.text;
+      }
+    } catch (err: any) {
+      if (s.enabled && s.baseUrl) {
+        text = await directFetch();
+      } else {
+        throw err;
+      }
     }
 
-    const data = await resp.json();
-    const text = data?.text;
     if (typeof text !== "string" || !text.trim()) {
       throw new Error("AI provider returned empty content. Verify provider quota, model availability, or prompt syntax.");
     }
@@ -334,22 +415,13 @@ export const AIProvider = {
     if (p && p.keyRequired && !s.apiKey) throw new Error("need-key");
 
     const t0 = performance.now();
-    const resp = await fetch("/api/ai/generate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        instruction: "Reply with exactly: OK",
-        model: s.model,
-        customApiKey: s.apiKey,
-        customBaseUrl: s.baseUrl,
-        providerType: this.presetType(),
-        temperature: 0.1,
-      }),
-    });
-    const data = await resp.json();
-    const elapsed = Math.round(performance.now() - t0);
-    if (!resp.ok) throw new Error(data.error || "Failed");
-    return { text: data.text || "OK", elapsed };
+    try {
+      const text = await this.generate({ instruction: "Reply with exactly: OK", temperature: 0.1 });
+      const elapsed = Math.round(performance.now() - t0);
+      return { text, elapsed };
+    } catch (e: any) {
+      throw new Error(e.message || "Failed");
+    }
   },
 
   async fetchModels(customBaseUrl?: string, customApiKey?: string): Promise<string[]> {
@@ -361,26 +433,64 @@ export const AIProvider = {
       throw new Error("Base URL is required to fetch models.");
     }
 
-    const resp = await fetch("/api/ai/models", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        customBaseUrl: baseUrl,
-        customApiKey: apiKey,
-        providerType: this.presetType(),
-      }),
-    });
+    const safeFetchJson = async (resp: Response): Promise<any> => {
+      const rawText = await resp.text();
+      try {
+        return JSON.parse(rawText);
+      } catch (err) {
+        if (rawText.includes("<!DOCTYPE") || rawText.includes("<html") || rawText.includes("The page")) {
+          throw new Error("Endpoint returned an HTML 404 page instead of JSON.");
+        }
+        throw new Error(`Invalid JSON response (HTTP ${resp.status}): ${rawText.slice(0, 100)}`);
+      }
+    };
 
-    const data = await resp.json();
-    if (!resp.ok) {
-      throw new Error(data.error || `HTTP ${resp.status} - Failed to fetch models`);
+    const directFetchModels = async (): Promise<string[]> => {
+      let cleanBase = String(baseUrl).trim().replace(/\/+$/, "");
+      cleanBase = cleanBase.replace(/\/chat\/completions$/, "").replace(/\/messages$/, "");
+
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
+
+      const resp = await fetch(`${cleanBase}/models`, { method: "GET", headers });
+      const data = await safeFetchJson(resp);
+      if (!resp.ok) {
+        throw new Error(data.error?.message || data.message || `HTTP ${resp.status}`);
+      }
+
+      let models: string[] = [];
+      if (Array.isArray(data.data)) {
+        models = data.data.map((m: any) => m.id || m.name || String(m)).filter(Boolean);
+      } else if (Array.isArray(data.models)) {
+        models = data.models.map((m: any) => m.id || m.name || String(m)).filter(Boolean);
+      }
+      return models;
+    };
+
+    try {
+      const resp = await fetch("/api/ai/models", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          customBaseUrl: baseUrl,
+          customApiKey: apiKey,
+          providerType: this.presetType(),
+        }),
+      });
+
+      if (!resp.ok) {
+        return await directFetchModels();
+      }
+
+      const data = await safeFetchJson(resp);
+      if (!Array.isArray(data.models) || data.models.length === 0) {
+        return await directFetchModels();
+      }
+
+      return data.models;
+    } catch (e) {
+      return await directFetchModels();
     }
-
-    if (!Array.isArray(data.models) || data.models.length === 0) {
-      throw new Error("No models returned by provider endpoint.");
-    }
-
-    return data.models;
   },
 
   async testModel(modelId: string, customBaseUrl?: string, customApiKey?: string): Promise<{ ok: boolean; elapsed: number; text: string; error?: string }> {
@@ -390,31 +500,70 @@ export const AIProvider = {
     const t0 = performance.now();
 
     try {
-      const resp = await fetch("/api/ai/generate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          instruction: "Respond with the single word: OK",
-          model: modelId,
-          customApiKey: apiKey,
-          customBaseUrl: baseUrl,
-          providerType: this.presetType(),
-          temperature: 0.1,
-        }),
-      });
+      const safeFetchJson = async (resp: Response): Promise<any> => {
+        const rawText = await resp.text();
+        try {
+          return JSON.parse(rawText);
+        } catch (err) {
+          throw new Error(`Returned HTML/non-JSON page (HTTP ${resp.status}). Check Base URL.`);
+        }
+      };
+
+      const directTest = async (): Promise<string> => {
+        let cleanBase = String(baseUrl).trim().replace(/\/+$/, "");
+        cleanBase = cleanBase.replace(/\/chat\/completions$/, "").replace(/\/messages$/, "");
+
+        const isAnthropic = this.presetType() === "anthropic";
+        const headers: Record<string, string> = { "Content-Type": "application/json" };
+        if (apiKey) {
+          if (isAnthropic) {
+            headers["x-api-key"] = apiKey;
+            headers["anthropic-version"] = "2023-06-01";
+            headers["anthropic-dangerous-direct-browser-access"] = "true";
+          } else {
+            headers["Authorization"] = `Bearer ${apiKey}`;
+          }
+        }
+
+        const endpoint = isAnthropic ? `${cleanBase}/messages` : `${cleanBase}/chat/completions`;
+        const bodyPayload = isAnthropic
+          ? { model: modelId, max_tokens: 10, messages: [{ role: "user", content: "OK" }] }
+          : { model: modelId, messages: [{ role: "user", content: "OK" }] };
+
+        const resp = await fetch(endpoint, { method: "POST", headers, body: JSON.stringify(bodyPayload) });
+        const data = await safeFetchJson(resp);
+        if (!resp.ok) throw new Error(data.error?.message || data.message || `HTTP ${resp.status}`);
+        const text = isAnthropic ? data?.content?.[0]?.text : data?.choices?.[0]?.message?.content;
+        return text || "OK";
+      };
+
+      let resText = "";
+      try {
+        const resp = await fetch("/api/ai/generate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            instruction: "Respond with the single word: OK",
+            model: modelId,
+            customApiKey: apiKey,
+            customBaseUrl: baseUrl,
+            providerType: this.presetType(),
+            temperature: 0.1,
+          }),
+        });
+
+        if (!resp.ok) {
+          resText = await directTest();
+        } else {
+          const data = await safeFetchJson(resp);
+          resText = data?.text || "OK";
+        }
+      } catch (err) {
+        resText = await directTest();
+      }
 
       const elapsed = Math.round(performance.now() - t0);
-      const data = await resp.json();
-
-      if (!resp.ok) {
-        return { ok: false, elapsed, text: "", error: data.error || `HTTP ${resp.status}` };
-      }
-
-      if (!data.text || typeof data.text !== "string") {
-        return { ok: false, elapsed, text: "", error: "Empty response content" };
-      }
-
-      return { ok: true, elapsed, text: data.text.trim() };
+      return { ok: true, elapsed, text: String(resText).trim() };
     } catch (e: any) {
       return { ok: false, elapsed: Math.round(performance.now() - t0), text: "", error: e.message || String(e) };
     }
