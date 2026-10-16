@@ -114,10 +114,214 @@ export const CourseDetail: React.FC<CourseDetailProps> = ({ slug, currentLang, n
   >([]);
   const [batchGenerating, setBatchGenerating] = useState(false);
   const [batchProgressText, setBatchProgressText] = useState("");
+  const [showBookExportModal, setShowBookExportModal] = useState(false);
+  const [generatingAllLessons, setGeneratingAllLessons] = useState(false);
+  const [genAllProgress, setGenAllProgress] = useState({ current: 0, total: 0, title: "" });
 
   const t = (k: string) => (STR as any)[currentLang][k] || (STR.en as any)[k] || k;
   const isAr = currentLang === "ar";
   const plan = Store.plan();
+
+  const handleGenerateAllCourseLessons = async () => {
+    if (!course || !course.outline) return;
+    setGeneratingAllLessons(true);
+
+    const flatList: { modIdx: number; lesIdx: number; title: string; key: string; modTitle: string }[] = [];
+    course.outline.modules.forEach((m, mI) => {
+      m.lessons.forEach((l, lI) => {
+        flatList.push({ modIdx: mI, lesIdx: lI, title: l, key: `${mI}:${lI}`, modTitle: m.title });
+      });
+    });
+
+    const ungenerated = flatList.filter((item) => !course.lessonDocs?.[item.key]);
+    if (ungenerated.length === 0) {
+      onToast(isAr ? "جميع دروس الدورة جاهزة وموجودة بالكتاب الشامل!" : "All course lessons are generated and ready!", "ok");
+      setGeneratingAllLessons(false);
+      return;
+    }
+
+    try {
+      const personal = course.personal ? await Store.getPersonalization() : null;
+      const totalLessons = flatList.length;
+
+      let covered = course.brainCovered ? [...course.brainCovered] : [];
+      let usedTerms = course.brainUsedTerms ? [...course.brainUsedTerms] : [];
+
+      for (let i = 0; i < ungenerated.length; i++) {
+        const item = ungenerated[i];
+        setGenAllProgress({
+          current: i + 1,
+          total: ungenerated.length,
+          title: item.title,
+        });
+
+        const brain = getBrain(slug);
+        rehydrate(brain, covered, usedTerms, course.glossary, course.masterSummary);
+
+        const result = await CourseAI.generateLessonStream(
+          course.title || course.topic,
+          course.topic,
+          item.modTitle,
+          item.title,
+          personal,
+          course.lang || currentLang,
+          undefined,
+          undefined,
+          {
+            slug,
+            lessonIndex: item.lesIdx,
+            totalLessons,
+            outline: course.outline,
+            settings: course.settings,
+            difficulty: course.settings?.difficulty || "beginner",
+            course,
+            brainCovered: covered,
+            brainUsedTerms: usedTerms,
+            masterSummary: course.masterSummary,
+            glossary: course.glossary,
+          }
+        );
+
+        if (!course.lessonDocs) course.lessonDocs = {};
+        course.lessonDocs[item.key] = result.doc;
+        if (!course.lessons) course.lessons = {};
+        course.lessons[item.key] = result.html;
+        course.masterSummary = result.masterSummary;
+
+        const curDigest = result.doc.digest || `${result.doc.goal || ""} ${result.doc.takeaway || ""}`.trim();
+        const existingCovIdx = covered.findIndex((c) => c.title === item.title);
+        if (existingCovIdx >= 0) covered[existingCovIdx] = { title: item.title, digest: curDigest };
+        else covered.push({ title: item.title, digest: curDigest });
+        course.brainCovered = covered;
+
+        const termsSet = new Set<string>(usedTerms.map((t) => t.toLowerCase().trim()));
+        if (Array.isArray(result.doc.terms)) {
+          for (const t of result.doc.terms) {
+            if (t && typeof t === "string") termsSet.add(t.toLowerCase().trim());
+          }
+        }
+        usedTerms = Array.from(termsSet);
+        course.brainUsedTerms = usedTerms;
+
+        await Store.saveCourse(course);
+        setCourse({ ...course });
+      }
+
+      onToast(isAr ? "تم إكمال وتوليد جميع دروس الدورة بنجاح!" : "All course lessons generated successfully!", "ok");
+    } catch (e: any) {
+      console.error("[CourseDetail] Batch generate all failed:", e);
+      onToast(isAr ? "حدث توقف، يمكنك تصدير ما تم توليده الآن." : "Generation paused, exporting available lessons.", "err");
+    } finally {
+      setGeneratingAllLessons(false);
+    }
+  };
+
+  const handleDownloadStandaloneBook = () => {
+    if (!course || !course.outline) return;
+    const flatList: { key: string; title: string; modTitle: string }[] = [];
+    course.outline.modules.forEach((m, mI) => {
+      m.lessons.forEach((l, lI) => {
+        flatList.push({ key: `${mI}:${lI}`, title: l, modTitle: m.title });
+      });
+    });
+
+    function escStr(s: any) {
+      return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+    }
+
+    let bookContent = `<!DOCTYPE html>
+<html lang="${course.lang || "ar"}" dir="${(course.lang || currentLang) === "ar" ? "rtl" : "ltr"}">
+<head>
+  <meta charset="UTF-8">
+  <title>${escStr(course.title || course.topic)} - ${isAr ? "كتاب الدورة الشامل" : "Full Course Textbook"}</title>
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; line-height: 1.75; color: #111; max-width: 900px; margin: 0 auto; padding: 40px 24px; background: #ffffff; }
+    .cover { text-align: center; padding: 60px 24px; border: 3px double #7c3aed; border-radius: 20px; background: #fff; margin-bottom: 50px; }
+    .cover h1 { font-size: 32px; color: #1e1b2e; margin-bottom: 12px; }
+    .cover p { font-size: 16px; color: #6b7280; }
+    .toc { background: #fafafa; border: 1px solid #e5e7eb; border-radius: 16px; padding: 28px; margin-bottom: 40px; }
+    .lesson-section { background: #fff; border: 1px solid #e5e7eb; border-radius: 16px; padding: 32px; margin-bottom: 32px; page-break-after: always; }
+    .lesson-title { font-size: 22px; border-bottom: 2px solid #7c3aed; padding-bottom: 8px; color: #1e1b2e; }
+    .mod-title { font-size: 12px; color: #7c3aed; font-weight: bold; text-transform: uppercase; }
+    pre { background: #1e1b2e; color: #f3f4f6; padding: 16px; border-radius: 12px; overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; margin: 16px 0; }
+    th, td { border: 1px solid #e5e7eb; padding: 10px 14px; text-align: start; }
+    th { background: #7c3aed; color: #fff; }
+  </style>
+</head>
+<body>
+  <div class="cover">
+    <div style="font-size: 14px; font-weight: bold; color: #7c3aed; text-transform: uppercase;">${escStr(course.title || course.topic)}</div>
+    <h1>${escStr(course.title || course.topic)}</h1>
+    <p>${escStr(course.outline.summary || "")}</p>
+    <div style="margin-top: 30px; font-size: 14px; color: #6b7280;">
+      <div>${isAr ? "المحاور الدراسية:" : "Modules:"} ${course.outline.modules.length} | ${isAr ? "إجمالي الدروس:" : "Lessons:"} ${flatList.length}</div>
+      <div>TutorAI &bull; ${new Date().toLocaleDateString(isAr ? "ar-EG" : "en-US")}</div>
+    </div>
+  </div>
+
+  <div class="toc">
+    <h2>${isAr ? "📚 فهرس ومحتويات الدورة" : "Table of Contents"}</h2>
+    <ul>
+`;
+
+    course.outline.modules.forEach((m, mI) => {
+      bookContent += `<li><strong>${mI + 1}. ${escStr(m.title)}</strong><ul>`;
+      m.lessons.forEach((l, lI) => {
+        const k = `${mI}:${lI}`;
+        const hasDoc = Boolean(course.lessons?.[k] || course.lessonDocs?.[k]);
+        bookContent += `<li>${escStr(l)} ${hasDoc ? "✓" : `(${isAr ? "قيد التوليد" : "Pending"})`}</li>`;
+      });
+      bookContent += `</ul></li>`;
+    });
+
+    bookContent += `</ul></div>`;
+
+    if (course.masterSummary || (course.glossary && course.glossary.length > 0)) {
+      bookContent += `<div class="lesson-section">`;
+      if (course.masterSummary) {
+        bookContent += `<h2>🧠 ${isAr ? "الذاكرة التراكمية وملخص الدورة" : "Course Master Summary"}</h2><p>${escStr(course.masterSummary)}</p>`;
+      }
+      if (course.glossary && course.glossary.length > 0) {
+        bookContent += `<h2>📖 ${isAr ? "معجم المصطلحات الأكاديمية" : "Glossary"}</h2><table><thead><tr><th>${isAr ? "المصطلح" : "Term"}</th><th>${isAr ? "التعريف" : "Definition"}</th></tr></thead><tbody>`;
+        course.glossary.forEach((g) => {
+          bookContent += `<tr><td><strong>${escStr(g.term)}</strong></td><td>${escStr(g.def)}</td></tr>`;
+        });
+        bookContent += `</tbody></table>`;
+      }
+      bookContent += `</div>`;
+    }
+
+    flatList.forEach((item, idx) => {
+      const renderedHtml = course.lessons?.[item.key];
+      const doc = course.lessonDocs?.[item.key];
+
+      if (renderedHtml || doc) {
+        bookContent += `<div class="lesson-section">`;
+        bookContent += `<div class="mod-title">${escStr(item.modTitle)}</div>`;
+        bookContent += `<h1 class="lesson-title">${idx + 1}. ${escStr(item.title)}</h1>`;
+        if (renderedHtml) {
+          bookContent += DOMPurify.sanitize(renderedHtml);
+        } else if (doc) {
+          bookContent += `<p><strong>${escStr(doc.goal)}</strong></p><p>${escStr(doc.takeaway)}</p>`;
+        }
+        bookContent += `</div>`;
+      }
+    });
+
+    bookContent += `</body></html>`;
+
+    const blob = new Blob([bookContent], { type: "text/html;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${(course.title || course.topic).replace(/[^\w\u0600-\u06FF]/g, "_")}_Full_Book.html`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    onToast(isAr ? "تم تحميل ملف الكتاب الشامل بنجاح!" : "Full book downloaded successfully!", "ok");
+  };
 
   const loadCourseData = async () => {
     setLoading(true);
@@ -841,13 +1045,13 @@ export const CourseDetail: React.FC<CourseDetailProps> = ({ slug, currentLang, n
               </p>
             )}
           </div>
-          <div style={{ display: "flex", gap: 8 }}>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <button
-              className="btn btn-ghost"
-              style={{ padding: "8px 16px", fontSize: 13 }}
-              onClick={() => window.print()}
+              className="btn btn-primary"
+              style={{ padding: "8px 18px", fontSize: 13, fontWeight: 700 }}
+              onClick={() => setShowBookExportModal(true)}
             >
-              🖨 {isAr ? "طباعة / تصدير" : "Print / PDF"}
+              📚 {isAr ? "تصدير وطباعة كتاب الدورة الشامل (PDF)" : "Export Full Course PDF Book"}
             </button>
             <button
               className="btn btn-ghost"
@@ -1632,15 +1836,244 @@ export const CourseDetail: React.FC<CourseDetailProps> = ({ slug, currentLang, n
                     onChange={(e) => setChatInput(e.target.value)}
                     onKeyDown={(e) => { if (e.key === "Enter") handleSendChat(); }}
                   />
-                  <button className="btn btn-primary" onClick={handleSendChat}>
-                    {t("send")}
-                  </button>
                 </div>
               </div>
             )}
           </div>
         </div>
       </div>
+
+      {/* FULL COURSE BOOK EXPORT MODAL */}
+      {showBookExportModal && (
+        <div className="overlay book-modal-overlay">
+          <div className="modal wide book-modal" style={{ maxWidth: 960 }}>
+            <div className="no-print" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20, paddingBottom: 14, borderBottom: "1px solid var(--line)" }}>
+              <div>
+                <h2 style={{ margin: 0, fontSize: 22, fontWeight: 800 }}>
+                  📚 {isAr ? "استخراج وتصدير كتاب الدورة الشامل" : "Full Course Textbook Export"}
+                </h2>
+                <div style={{ color: "var(--muted)", fontSize: 13, marginTop: 4 }}>
+                  {course?.title || course?.topic}
+                </div>
+              </div>
+              <button className="btn btn-ghost" onClick={() => setShowBookExportModal(false)} style={{ padding: "6px 14px", fontSize: 13 }}>
+                ✕ {isAr ? "إغلاق" : "Close"}
+              </button>
+            </div>
+
+            {/* UNGENERATED LESSONS BANNER & ACTION */}
+            {(() => {
+              if (!course || !course.outline) return null;
+              const flatList: { key: string; title: string; modTitle: string }[] = [];
+              course.outline.modules.forEach((m, mI) => {
+                m.lessons.forEach((l, lI) => {
+                  flatList.push({ key: `${mI}:${lI}`, title: l, modTitle: m.title });
+                });
+              });
+              const generatedCount = flatList.filter((item) => Boolean(course.lessons?.[item.key] || course.lessonDocs?.[item.key])).length;
+              const ungeneratedCount = flatList.length - generatedCount;
+
+              return (
+                <div className="no-print" style={{ marginBottom: 20 }}>
+                  <div style={{ padding: "16px 20px", background: "#f5f3ff", border: "1.5px solid var(--line)", borderRadius: 14, marginBottom: 16 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12 }}>
+                      <div>
+                        <div style={{ fontWeight: 800, fontSize: 15, color: "var(--alpha-dark)" }}>
+                          📊 {isAr ? `حالة محتوى الكتاب: ${generatedCount} من أصل ${flatList.length} درساً جرى توليدها` : `Book Status: ${generatedCount} of ${flatList.length} lessons ready`}
+                        </div>
+                        {ungeneratedCount > 0 ? (
+                          <div style={{ fontSize: 13, color: "var(--muted)", marginTop: 4 }}>
+                            {isAr ? `تنبيه: يوجد ${ungeneratedCount} دروس لم تجسد بعد. يمكنك توليدها دفعة واحدة الآن أو تصدير الدروس الجاهزة.` : `Notice: ${ungeneratedCount} lessons pending. You can generate all or export ready lessons.`}
+                          </div>
+                        ) : (
+                          <div style={{ fontSize: 13, color: "#166534", fontWeight: 700, marginTop: 4 }}>
+                            ✓ {isAr ? "كافة دروس الدورة متكاملة ومولدة بنجاح!" : "All lessons generated and ready for print!"}
+                          </div>
+                        )}
+                      </div>
+
+                      {ungeneratedCount > 0 && (
+                        generatingAllLessons ? (
+                          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                            <div className="spinner" style={{ width: 22, height: 22, margin: 0 }}></div>
+                            <span style={{ fontSize: 13, fontWeight: 700, color: "var(--alpha-dark)" }}>
+                              {isAr ? `جاري توليد درس (${genAllProgress.current}/${genAllProgress.total}): ${genAllProgress.title}...` : `Generating lesson ${genAllProgress.current}/${genAllProgress.total}...`}
+                            </span>
+                          </div>
+                        ) : (
+                          <button
+                            className="btn btn-primary"
+                            onClick={handleGenerateAllCourseLessons}
+                            style={{ padding: "10px 20px", fontSize: 13, fontWeight: 700 }}
+                          >
+                            ⚡ {isAr ? `توليد كافة الدروس المتبقية تلقائياً (${ungeneratedCount})` : `Generate Remaining Lessons (${ungeneratedCount})`}
+                          </button>
+                        )
+                      )}
+                    </div>
+                  </div>
+
+                  {/* PRINT & DOWNLOAD ACTIONS */}
+                  <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+                    <button
+                      className="btn btn-primary"
+                      onClick={() => window.print()}
+                      style={{ padding: "12px 24px", fontSize: 14, fontWeight: 800, flex: 1 }}
+                    >
+                      🖨️ {isAr ? "طباعة الكتاب كاملاً / حفظ كـ PDF" : "Print Full Book / Save as PDF"}
+                    </button>
+
+                    <button
+                      className="btn btn-ghost"
+                      onClick={handleDownloadStandaloneBook}
+                      style={{ padding: "12px 24px", fontSize: 14, fontWeight: 700, flex: 1, border: "1.5px solid var(--alpha)" }}
+                    >
+                      📥 {isAr ? "تحميل الكتاب كملف HTML مستقل" : "Download Standalone HTML Book"}
+                    </button>
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* FULL COURSE BOOK PREVIEW CONTAINER */}
+            {course && (
+              <div className="full-course-book" style={{ border: "1px solid var(--line)", borderRadius: 16, padding: 32, background: "#ffffff" }}>
+                {/* BOOK COVER PAGE */}
+                <div className="book-cover">
+                  <div style={{ fontSize: 13, fontWeight: 800, color: "var(--alpha)", textTransform: "uppercase", letterSpacing: "1px", marginBottom: 12 }}>
+                    {isAr ? "الدليل التعليمي والكتاب المعرفي الشامل" : "Comprehensive Educational Guide & Textbook"}
+                  </div>
+                  <h1 style={{ fontSize: 32, fontWeight: 800, margin: "0 0 12px", color: "var(--ink)" }}>
+                    {course.title || course.topic}
+                  </h1>
+                  {course.outline?.summary && (
+                    <p style={{ fontSize: 16, color: "var(--muted)", maxWidth: 650, margin: "0 0 30px", lineHeight: 1.6 }}>
+                      {course.outline.summary}
+                    </p>
+                  )}
+                  <div style={{ borderTop: "1px dashed var(--line)", paddingTop: 20, marginTop: 20, display: "flex", gap: 20, fontSize: 13, color: "var(--muted)", justifyContent: "center", flexWrap: "wrap" }}>
+                    <div><strong>{isAr ? "عدد المحاور:" : "Modules:"}</strong> {course.outline?.modules.length}</div>
+                    <div><strong>{isAr ? "إجمالي الدروس:" : "Lessons:"}</strong> {course.outline?.modules.reduce((a, m) => a + m.lessons.length, 0)}</div>
+                    <div><strong>{isAr ? "المستوى:" : "Level:"}</strong> {course.settings?.difficulty || "Beginner"}</div>
+                  </div>
+                  <div style={{ marginTop: 24, fontSize: 12, color: "var(--muted)" }}>
+                    TutorAI &bull; {isAr ? "منصة التعليم الذكي والتأليف الأكاديمي" : "Smart Learning Platform"}
+                  </div>
+                </div>
+
+                {/* TABLE OF CONTENTS */}
+                <div className="book-toc">
+                  <h2 style={{ fontSize: 22, fontWeight: 800, marginBottom: 16, borderBottom: "2px solid var(--alpha)", paddingBottom: 8 }}>
+                    📚 {isAr ? "فهرس ومحتويات الدورة" : "Table of Contents"}
+                  </h2>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+                    {course.outline?.modules.map((m, mI) => (
+                      <div key={mI} style={{ background: "#fbfaff", border: "1px solid var(--line)", borderRadius: 12, padding: 16 }}>
+                        <div style={{ fontWeight: 800, fontSize: 15, color: "var(--alpha-dark)", marginBottom: 8 }}>
+                          {mI + 1}. {m.title}
+                        </div>
+                        <div style={{ display: "flex", flexDirection: "column", gap: 6, paddingRight: isAr ? 12 : 0, paddingLeft: isAr ? 0 : 12 }}>
+                          {m.lessons.map((l, lI) => {
+                            const k = `${mI}:${lI}`;
+                            const isReady = Boolean(course.lessons?.[k] || course.lessonDocs?.[k]);
+                            return (
+                              <div key={lI} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: "var(--ink)" }}>
+                                <span>&bull; {l}</span>
+                                <span style={{ fontWeight: 700, color: isReady ? "#166534" : "var(--muted)" }}>
+                                  {isReady ? `✓ ${isAr ? "جاهز" : "Ready"}` : `(${isAr ? "قيد التوليد" : "Pending"})`}
+                                </span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* COURSE MASTER SUMMARY & GLOSSARY */}
+                {(course.masterSummary || (course.glossary && course.glossary.length > 0)) && (
+                  <div className="book-lesson-wrapper" style={{ background: "#fafafa", border: "1px solid var(--line)", borderRadius: 16, padding: 24 }}>
+                    {course.masterSummary && (
+                      <div style={{ marginBottom: 24 }}>
+                        <h3 style={{ fontSize: 18, fontWeight: 800, margin: "0 0 8px", color: "var(--alpha-dark)" }}>
+                          🧠 {isAr ? "الذاكرة التراكمية وملخص المفهوم العام للدورة" : "Course Master Summary"}
+                        </h3>
+                        <p style={{ margin: 0, fontSize: 14, lineHeight: 1.7, color: "#374151" }}>
+                          {course.masterSummary}
+                        </p>
+                      </div>
+                    )}
+
+                    {course.glossary && course.glossary.length > 0 && (
+                      <div>
+                        <h3 style={{ fontSize: 18, fontWeight: 800, margin: "0 0 12px", color: "var(--alpha-dark)" }}>
+                          📖 {isAr ? "معجم المصطلحات الأكاديمية للدورة" : "Course Glossary"}
+                        </h3>
+                        <div className="tbl-wrap">
+                          <table>
+                            <thead>
+                              <tr>
+                                <th style={{ width: "30%" }}>{isAr ? "المصطلح" : "Term"}</th>
+                                <th>{isAr ? "التعريف والأثر العلمي" : "Definition"}</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {course.glossary.map((g, gI) => (
+                                <tr key={gI}>
+                                  <td><strong>{g.term}</strong></td>
+                                  <td>{g.def}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* CHRONOLOGICAL LESSONS */}
+                {(() => {
+                  const flatLessons: { modTitle: string; title: string; key: string }[] = [];
+                  course.outline?.modules.forEach((m, mI) => {
+                    m.lessons.forEach((l, lI) => {
+                      flatLessons.push({ modTitle: m.title, title: l, key: `${mI}:${lI}` });
+                    });
+                  });
+
+                  return flatLessons.map((item, idx) => {
+                    const renderedHtml = course.lessons?.[item.key];
+                    const doc = course.lessonDocs?.[item.key];
+
+                    if (!renderedHtml && !doc) return null;
+
+                    return (
+                      <div key={item.key} className="book-lesson-wrapper">
+                        <div style={{ fontSize: 12, fontWeight: 800, color: "var(--alpha)", textTransform: "uppercase", marginBottom: 4 }}>
+                          {item.modTitle}
+                        </div>
+                        <h2 style={{ fontSize: 22, fontWeight: 800, marginTop: 0, marginBottom: 18, borderBottom: "2px solid var(--line)", paddingBottom: 8 }}>
+                          {idx + 1}. {item.title}
+                        </h2>
+
+                        {renderedHtml ? (
+                          <div className="lesson-body" dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(renderedHtml) }} />
+                        ) : doc ? (
+                          <div className="lesson-body">
+                            <p><strong>🎯 {isAr ? "هدف الدرس:" : "Goal:"}</strong> {doc.goal}</p>
+                            <p><strong>💎 {isAr ? "الخلاصة:" : "Takeaway:"}</strong> {doc.takeaway}</p>
+                          </div>
+                        ) : null}
+                      </div>
+                    );
+                  });
+                })()}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 };

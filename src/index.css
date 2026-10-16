@@ -337,4 +337,78 @@ button.opt.sel{border-color:var(--alpha);background:var(--alpha-50);color:var(--
     padding: 1px 4px !important;
     border-radius: 4px !important;
   }
+
+  /* Full Course Book Print Overrides */
+  .overlay.book-modal-overlay {
+    position: static !important;
+    background: transparent !important;
+    padding: 0 !important;
+    display: block !important;
+  }
+
+  .modal.book-modal {
+    max-width: 100% !important;
+    box-shadow: none !important;
+    border: none !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    max-height: none !important;
+    overflow: visible !important;
+  }
+
+  .book-cover {
+    min-height: 92vh !important;
+    border: 2px solid #7c3aed !important;
+    page-break-after: always !important;
+    break-after: page !important;
+  }
+
+  .book-toc {
+    border: none !important;
+    padding: 0 !important;
+    page-break-after: always !important;
+    break-after: page !important;
+  }
+
+  .book-lesson-wrapper {
+    border: none !important;
+    padding: 0 !important;
+    margin-bottom: 0 !important;
+    page-break-after: always !important;
+    break-after: page !important;
+  }
+}
+
+/* FULL COURSE BOOK SCREEN STYLES */
+.full-course-book {
+  background: #ffffff;
+  color: #111827;
+}
+
+.book-cover {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  text-align: center;
+  min-height: 70vh;
+  padding: 40px 24px;
+  border: 3px double var(--alpha);
+  border-radius: 24px;
+  margin-bottom: 32px;
+  background: #ffffff;
+}
+
+.book-toc {
+  background: #ffffff;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 24px;
+  margin-bottom: 32px;
+}
+
+.book-lesson-wrapper {
+  margin-bottom: 32px;
+  padding-bottom: 24px;
+  border-bottom: 2px dashed var(--line);
 }

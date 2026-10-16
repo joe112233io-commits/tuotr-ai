@@ -1,5 +1,6 @@
 import { Store } from "./store";
 import { AISettings, CourseOutline, Course } from "./types";
+import { GoogleGenAI } from "@google/genai";
 import {
   setTransport,
   designOutline,
@@ -290,19 +291,20 @@ export const AIProvider = {
     const s = this.settings;
 
     const safeFetchJson = async (resp: Response): Promise<any> => {
+      const contentType = resp.headers.get("content-type") || "";
       const rawText = await resp.text();
+      if (contentType.includes("text/html") || rawText.trim().startsWith("<!") || rawText.includes("<html")) {
+        throw new Error("HTML_PROXY_UNAVAILABLE");
+      }
       try {
         return JSON.parse(rawText);
       } catch (err) {
-        if (rawText.includes("<!DOCTYPE") || rawText.includes("<html") || rawText.includes("The page")) {
-          throw new Error("Server proxy or static deployment returned an HTML 404 page instead of a JSON response. Please check your Base URL settings.");
-        }
         throw new Error(`Invalid JSON response (HTTP ${resp.status}): ${rawText.slice(0, 100)}`);
       }
     };
 
     const directFetch = async (): Promise<string> => {
-      if (!s.baseUrl) throw new Error("No Base URL provided.");
+      if (!s.baseUrl) throw new Error("Base URL is required for custom provider.");
       let cleanBase = String(s.baseUrl).trim().replace(/\/+$/, "");
       cleanBase = cleanBase.replace(/\/chat\/completions$/, "").replace(/\/messages$/, "");
 
@@ -344,6 +346,11 @@ export const AIProvider = {
         body: JSON.stringify(bodyPayload),
       });
 
+      const contentType = resp.headers.get("content-type") || "";
+      if (contentType.includes("text/html")) {
+        throw new Error(`Base URL "${s.baseUrl}" returned an HTML page instead of API JSON. Please verify your Base URL in Settings (e.g. https://openrouter.ai/api/v1).`);
+      }
+
       const data = await safeFetchJson(resp);
       if (!resp.ok) {
         throw new Error(data.error?.message || data.message || `Provider HTTP ${resp.status}`);
@@ -354,6 +361,30 @@ export const AIProvider = {
         throw new Error("Custom provider returned empty content.");
       }
       return text;
+    };
+
+    const directGeminiFetch = async (): Promise<string> => {
+      const apiKey = process.env.GEMINI_API_KEY || (import.meta as any).env?.VITE_GEMINI_API_KEY || "";
+      if (!apiKey) {
+        throw new Error("Backend AI proxy is unavailable on static deployments. Please configure an AI Provider Base URL and API Key in Settings (⚙️ الإعدادات).");
+      }
+      const ai = new GoogleGenAI({ apiKey });
+      const candidateModels = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-3.8-flash"];
+      let lastErr = "";
+      for (const m of candidateModels) {
+        try {
+          const resp = await ai.models.generateContent({
+            model: m,
+            contents: instruction,
+            config: { temperature: typeof temperature === "number" ? temperature : s.temperature ?? 0.2 },
+          });
+          const resText = resp.text || "";
+          if (resText.trim()) return resText;
+        } catch (e: any) {
+          lastErr = e.message || String(e);
+        }
+      }
+      throw new Error(`Gemini Client Error: ${lastErr}`);
     };
 
     let text = "";
@@ -372,7 +403,14 @@ export const AIProvider = {
         }),
       });
 
-      if (!resp.ok) {
+      const contentType = resp.headers.get("content-type") || "";
+      if (contentType.includes("text/html")) {
+        if (s.enabled && s.baseUrl) {
+          text = await directFetch();
+        } else {
+          text = await directGeminiFetch();
+        }
+      } else if (!resp.ok) {
         const data = await safeFetchJson(resp).catch(() => ({}));
         if (s.enabled && s.baseUrl) {
           text = await directFetch();
@@ -388,7 +426,11 @@ export const AIProvider = {
       if (s.enabled && s.baseUrl) {
         text = await directFetch();
       } else {
-        throw err;
+        try {
+          text = await directGeminiFetch();
+        } catch (gErr) {
+          throw err;
+        }
       }
     }
 
@@ -416,7 +458,150 @@ export const AIProvider = {
     onThought?: (thought: string) => void;
   }): Promise<string> {
     const s = this.settings;
-    let fullText = "";
+
+    const directStreamFetch = async (): Promise<string> => {
+      if (!s.baseUrl) throw new Error("Base URL is required for custom provider.");
+      let cleanBase = String(s.baseUrl).trim().replace(/\/+$/, "");
+      cleanBase = cleanBase.replace(/\/chat\/completions$/, "").replace(/\/messages$/, "");
+
+      const isAnthropic = this.presetType() === "anthropic";
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://tutorai.me",
+        "X-Title": "TutorAI",
+      };
+      if (s.apiKey) {
+        if (isAnthropic) {
+          headers["x-api-key"] = s.apiKey;
+          headers["anthropic-version"] = "2023-06-01";
+          headers["anthropic-dangerous-direct-browser-access"] = "true";
+        } else {
+          headers["Authorization"] = `Bearer ${s.apiKey}`;
+        }
+      }
+
+      const endpoint = isAnthropic ? `${cleanBase}/messages` : `${cleanBase}/chat/completions`;
+      const tempVal = typeof opts.temperature === "number" ? opts.temperature : s.temperature ?? 0.2;
+      const bodyPayload = isAnthropic
+        ? {
+            model: s.model || "claude-3-5-sonnet-20241022",
+            max_tokens: 4000,
+            temperature: tempVal,
+            messages: [{ role: "user", content: opts.instruction }],
+            stop_sequences: opts.stopSequences || undefined,
+            stream: true,
+          }
+        : {
+            model: s.model || "gpt-4o-mini",
+            temperature: tempVal,
+            messages: [{ role: "user", content: opts.instruction }],
+            stop: opts.stopSequences || undefined,
+            stream: true,
+          };
+
+      const resp = await fetch(endpoint, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(bodyPayload),
+      });
+
+      const contentType = resp.headers.get("content-type") || "";
+      if (contentType.includes("text/html")) {
+        throw new Error(`Base URL "${s.baseUrl}" returned an HTML page instead of API stream. Check Base URL in Settings.`);
+      }
+
+      if (!resp.ok) {
+        const rawErr = await resp.text();
+        let errMsg = `HTTP ${resp.status}`;
+        try {
+          const errJson = JSON.parse(rawErr);
+          errMsg = errJson.error?.message || errJson.message || errMsg;
+        } catch (e) {}
+        throw new Error(`Provider Stream Error: ${errMsg}`);
+      }
+
+      let fullStreamText = "";
+      if (resp.body) {
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop() || "";
+
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (trimmed.startsWith("data: ")) {
+              const dataStr = trimmed.slice(6);
+              if (dataStr === "[DONE]") continue;
+              try {
+                const parsed = JSON.parse(dataStr);
+                if (isAnthropic) {
+                  if (parsed.type === "content_block_delta") {
+                    if (parsed.delta?.type === "thinking_delta" && parsed.delta?.thinking) {
+                      opts.onThought?.(parsed.delta.thinking);
+                    } else if (parsed.delta?.text) {
+                      fullStreamText += parsed.delta.text;
+                      opts.onChunk?.(parsed.delta.text);
+                    }
+                  }
+                } else {
+                  const delta = parsed.choices?.[0]?.delta;
+                  if (delta) {
+                    const reasoning = delta.reasoning_content || delta.reasoning || delta.thought;
+                    if (reasoning) {
+                      opts.onThought?.(reasoning);
+                    }
+                    if (delta.content) {
+                      fullStreamText += delta.content;
+                      opts.onChunk?.(delta.content);
+                    }
+                  }
+                }
+              } catch (e) {}
+            }
+          }
+        }
+      }
+
+      if (fullStreamText.trim()) return fullStreamText;
+      return await this.generate(opts);
+    };
+
+    const directGeminiStreamFetch = async (): Promise<string> => {
+      const apiKey = process.env.GEMINI_API_KEY || (import.meta as any).env?.VITE_GEMINI_API_KEY || "";
+      if (!apiKey) {
+        return await this.generate(opts);
+      }
+      const ai = new GoogleGenAI({ apiKey });
+      const candidateModels = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-3.8-flash"];
+      let lastErr = "";
+      for (const m of candidateModels) {
+        try {
+          const responseStream = await ai.models.generateContentStream({
+            model: m,
+            contents: opts.instruction,
+            config: { temperature: typeof opts.temperature === "number" ? opts.temperature : s.temperature ?? 0.2 },
+          });
+          let full = "";
+          for await (const chunk of responseStream) {
+            const textChunk = chunk.text || "";
+            if (textChunk) {
+              full += textChunk;
+              opts.onChunk?.(textChunk);
+            }
+          }
+          if (full.trim()) return full;
+        } catch (e: any) {
+          lastErr = e.message || String(e);
+        }
+      }
+      return await this.generate(opts);
+    };
 
     try {
       const resp = await fetch("/api/ai/generate-stream", {
@@ -433,10 +618,15 @@ export const AIProvider = {
         }),
       });
 
-      if (!resp.ok) {
-        return await this.generate(opts);
+      const contentType = resp.headers.get("content-type") || "";
+      if (!resp.ok || contentType.includes("text/html")) {
+        if (s.enabled && s.baseUrl) {
+          return await directStreamFetch();
+        }
+        return await directGeminiStreamFetch();
       }
 
+      let fullText = "";
       if (resp.body) {
         const reader = resp.body.getReader();
         const decoder = new TextDecoder();
@@ -470,7 +660,9 @@ export const AIProvider = {
 
       if (fullText.trim()) return fullText;
     } catch (err) {
-      console.warn("[AIProvider] Stream failed, falling back to generate:", err);
+      if (s.enabled && s.baseUrl) {
+        return await directStreamFetch();
+      }
     }
 
     return await this.generate(opts);

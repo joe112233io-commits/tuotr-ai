@@ -7,7 +7,7 @@ import { GoogleGenAI } from "@google/genai";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Strict Allowlist and SSRF Guard
+// Strict SSRF Guard for Custom Base URLs
 function validateCustomUrl(rawUrl: string): { ok: boolean; reason?: string } {
   try {
     const parsed = new URL(rawUrl);
@@ -31,27 +31,6 @@ function validateCustomUrl(rawUrl: string): { ok: boolean; reason?: string } {
       host.endsWith(".local")
     ) {
       return { ok: false, reason: `Access to private or local network host (${host}) is strictly prohibited.` };
-    }
-
-    // Whitelist approved AI endpoints
-    const ALLOWED_DOMAINS = [
-      "openrouter.ai",
-      "api.opencode.ai",
-      "api.groq.com",
-      "api.deepseek.com",
-      "generativelanguage.googleapis.com",
-      "api.openai.com",
-      "api.anthropic.com",
-      "api.together.xyz",
-      "api.mistral.ai",
-    ];
-
-    const isWhitelisted = ALLOWED_DOMAINS.some(
-      (d) => host === d || host.endsWith(`.${d}`)
-    );
-
-    if (!isWhitelisted) {
-      return { ok: false, reason: `Target host "${host}" is not on the verified provider allowlist.` };
     }
 
     return { ok: true };
