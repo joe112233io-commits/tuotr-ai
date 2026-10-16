@@ -1,5 +1,5 @@
 import { Store } from "./store";
-import { AISettings, CourseOutline } from "./types";
+import { AISettings, CourseOutline, Course } from "./types";
 import {
   setTransport,
   designOutline,
@@ -8,6 +8,7 @@ import {
   buildCards,
   renderLesson,
   getBrain,
+  rehydrate,
   CourseBrain,
   LessonDoc,
   Term,
@@ -378,9 +379,27 @@ export const CourseAI = {
       outline: CourseOutline;
       settings: any;
       difficulty?: "beginner" | "intermediate" | "advanced";
+      course?: Course;
+      brainCovered?: { title: string; digest: string }[];
+      brainUsedTerms?: string[];
+      glossary?: Term[];
     }
-  ): Promise<{ doc: LessonDoc; html: string }> {
+  ): Promise<{
+    doc: LessonDoc;
+    html: string;
+    brainCovered: { title: string; digest: string }[];
+    brainUsedTerms: string[];
+  }> {
     const brain = ctx?.slug ? getBrain(ctx.slug) : new CourseBrain("default");
+
+    // Rehydrate brain state from persistent store or passed context
+    rehydrate(
+      brain,
+      ctx?.brainCovered || ctx?.course?.brainCovered,
+      ctx?.brainUsedTerms || ctx?.course?.brainUsedTerms,
+      ctx?.glossary || ctx?.course?.glossary
+    );
+
     if (ctx?.outline) {
       await brain.prime(
         ctx.outline,
@@ -410,6 +429,15 @@ export const CourseAI = {
     // Commit lesson to cumulative memory
     brain.commit(doc, lessonTitle);
 
+    // Sync state back to course object if provided to guarantee persistence outside memory Map
+    if (ctx?.course) {
+      ctx.course.brainCovered = [...brain.covered];
+      ctx.course.brainUsedTerms = Array.from(brain.usedTerms);
+      if (!ctx.course.glossary || ctx.course.glossary.length === 0) {
+        ctx.course.glossary = [...brain.glossary];
+      }
+    }
+
     // Code builds HTML deterministically
     const html = renderLesson(doc);
 
@@ -421,7 +449,12 @@ export const CourseAI = {
       }
     }
 
-    return { doc, html };
+    return {
+      doc,
+      html,
+      brainCovered: [...brain.covered],
+      brainUsedTerms: Array.from(brain.usedTerms),
+    };
   },
 
   async generateQuiz(

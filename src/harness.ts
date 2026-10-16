@@ -738,6 +738,22 @@ export class CourseBrain {
     this.slug = slug;
   }
 
+  rehydrate(
+    brainCovered?: { title: string; digest: string }[],
+    brainUsedTerms?: string[],
+    glossary?: Term[]
+  ) {
+    if (glossary && glossary.length > 0 && this.glossary.length === 0) {
+      this.glossary = [...glossary];
+    }
+    if (brainCovered && Array.isArray(brainCovered) && brainCovered.length > 0) {
+      this.covered = [...brainCovered];
+    }
+    if (brainUsedTerms && Array.isArray(brainUsedTerms) && brainUsedTerms.length > 0) {
+      this.usedTerms = new Set(brainUsedTerms.map((t) => t.toLowerCase().trim()));
+    }
+  }
+
   async prime(outline: Outline, topic: string, lang: string, difficulty?: string, source_excerpt?: string) {
     if (this.glossary.length > 0) return;
     this.glossary = await buildGlossary(outline, topic, lang, difficulty, source_excerpt);
@@ -752,12 +768,18 @@ export class CourseBrain {
   }
 
   commit(doc: LessonDoc, lessonTitle: string) {
-    this.covered.push({
-      title: lessonTitle,
-      digest: doc.digest || doc.goal + " " + doc.takeaway,
-    });
-    for (const term of doc.terms) {
-      this.usedTerms.add(term.toLowerCase().trim());
+    const digest = doc.digest || (doc.goal + " " + doc.takeaway);
+    const existingIdx = this.covered.findIndex((c) => c.title === lessonTitle);
+    if (existingIdx >= 0) {
+      this.covered[existingIdx] = { title: lessonTitle, digest };
+    } else {
+      this.covered.push({
+        title: lessonTitle,
+        digest,
+      });
+    }
+    for (const term of doc.terms || []) {
+      if (term) this.usedTerms.add(term.toLowerCase().trim());
     }
   }
 }
@@ -772,6 +794,18 @@ export function getBrain(slug: string): CourseBrain {
   }
   return b;
 }
+
+export function rehydrate(
+  brain: CourseBrain,
+  brainCovered?: { title: string; digest: string }[],
+  brainUsedTerms?: string[],
+  glossary?: Term[]
+): CourseBrain {
+  brain.rehydrate(brainCovered, brainUsedTerms, glossary);
+  return brain;
+}
+
+export const rehydrateBrain = rehydrate;
 
 export function resetBrain(slug: string) {
   brains.delete(slug);

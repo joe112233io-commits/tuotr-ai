@@ -33,6 +33,8 @@ export interface Course {
   lessons: Record<string, string>;
   lessonDocs?: Record<string, LessonDoc>;
   glossary?: Term[];
+  brainCovered?: { title: string; digest: string }[];
+  brainUsedTerms?: string[];
   lang: string;
 }
 

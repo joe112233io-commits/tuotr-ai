@@ -4,7 +4,7 @@ import { Store } from "../store";
 import { STR, planName } from "../i18n";
 import { CourseAI } from "../ai";
 import { Course } from "../types";
-import { LessonDoc, HarnessError } from "../harness";
+import { LessonDoc, HarnessError, rehydrate, getBrain } from "../harness";
 
 interface CourseDetailProps {
   slug: string;
@@ -122,6 +122,45 @@ export const CourseDetail: React.FC<CourseDetailProps> = ({ slug, currentLang, n
       const personal = course.personal ? await Store.getPersonalization() : null;
       const totalLessons = course.outline.modules.reduce((acc, m) => acc + m.lessons.length, 0);
 
+      // (1) Read brainCovered from course; if empty, rebuild from lessonDocs
+      let covered = course.brainCovered ? [...course.brainCovered] : [];
+      if (covered.length === 0 && course.lessonDocs) {
+        covered = [];
+        for (const [key, doc] of Object.entries(course.lessonDocs)) {
+          if (doc) {
+            let title = key;
+            const parts = key.split(/[:-]/).map(Number);
+            if (parts.length === 2 && course.outline.modules[parts[0]]?.lessons[parts[1]]) {
+              title = course.outline.modules[parts[0]].lessons[parts[1]];
+            }
+            const digest = doc.digest || `${doc.goal || ""} ${doc.takeaway || ""}`.trim();
+            if (digest && !covered.some((c) => c.title === title)) {
+              covered.push({ title, digest });
+            }
+          }
+        }
+        course.brainCovered = covered;
+      }
+
+      // (2) Read brainUsedTerms from course; if empty, aggregate from lessonDocs
+      let usedTerms = course.brainUsedTerms ? [...course.brainUsedTerms] : [];
+      if (usedTerms.length === 0 && course.lessonDocs) {
+        const termsSet = new Set<string>();
+        for (const doc of Object.values(course.lessonDocs)) {
+          if (doc && Array.isArray(doc.terms)) {
+            for (const t of doc.terms) {
+              if (t && typeof t === "string") termsSet.add(t.toLowerCase().trim());
+            }
+          }
+        }
+        usedTerms = Array.from(termsSet);
+        course.brainUsedTerms = usedTerms;
+      }
+
+      // (3) Rehydrate CourseBrain explicitly
+      const brain = getBrain(slug);
+      rehydrate(brain, covered, usedTerms, course.glossary);
+
       const result = await CourseAI.generateLessonStream(
         course.title || course.topic,
         course.topic,
@@ -140,14 +179,47 @@ export const CourseDetail: React.FC<CourseDetailProps> = ({ slug, currentLang, n
           outline: course.outline,
           settings: course.settings,
           difficulty: course.settings?.difficulty || "beginner",
+          course,
+          brainCovered: covered,
+          brainUsedTerms: usedTerms,
+          glossary: course.glossary,
         }
       );
 
-      // Save verified data and rendered HTML
+      // (4) Save verified data and rendered HTML
       if (!course.lessonDocs) course.lessonDocs = {};
       course.lessonDocs[lessonIdKey] = result.doc;
       if (!course.lessons) course.lessons = {};
       course.lessons[lessonIdKey] = result.html;
+
+      // (5) Update brainCovered with current lesson
+      if (!course.brainCovered) course.brainCovered = [];
+      const curDigest = result.doc.digest || `${result.doc.goal || ""} ${result.doc.takeaway || ""}`.trim();
+      const existingCovIdx = course.brainCovered.findIndex((c) => c.title === curLessonTitle);
+      if (existingCovIdx >= 0) {
+        course.brainCovered[existingCovIdx] = { title: curLessonTitle, digest: curDigest };
+      } else {
+        course.brainCovered.push({ title: curLessonTitle, digest: curDigest });
+      }
+
+      // (6) Update brainUsedTerms with current lesson terms
+      if (!course.brainUsedTerms) course.brainUsedTerms = [];
+      const termsSet = new Set<string>(course.brainUsedTerms.map((t) => t.toLowerCase().trim()));
+      if (Array.isArray(result.doc.terms)) {
+        for (const t of result.doc.terms) {
+          if (t && typeof t === "string") termsSet.add(t.toLowerCase().trim());
+        }
+      }
+      course.brainUsedTerms = Array.from(termsSet);
+
+      if (result.brainCovered && result.brainCovered.length > course.brainCovered.length) {
+        course.brainCovered = result.brainCovered;
+      }
+      if (result.brainUsedTerms && result.brainUsedTerms.length > course.brainUsedTerms.length) {
+        course.brainUsedTerms = result.brainUsedTerms;
+      }
+
+      // (7) Persist course state via Store.saveCourse
       await Store.saveCourse(course);
       setLessonHtml(result.html);
     } catch (e: any) {

@@ -18,6 +18,9 @@ function uuid(): string {
 }
 
 function ensureIdentity() {
+  if (typeof window === "undefined" || typeof localStorage === "undefined") {
+    return { id: "anon", ab: "A" };
+  }
   let id = localStorage.getItem(LS.uuid);
   let ab = localStorage.getItem(LS.ab);
   if (!id) {
@@ -33,6 +36,7 @@ function ensureIdentity() {
 
 function kvSafeGet<T>(key: string, fallback: T): T {
   try {
+    if (typeof localStorage === "undefined") return fallback;
     const v = localStorage.getItem(key);
     return v ? JSON.parse(v) : fallback;
   } catch (e) {
@@ -42,8 +46,46 @@ function kvSafeGet<T>(key: string, fallback: T): T {
 
 function kvSafeSet(key: string, val: any) {
   try {
+    if (typeof localStorage === "undefined") return;
     localStorage.setItem(key, JSON.stringify(val));
   } catch (e) {}
+}
+
+export function migrateCourseBrain(course: Course): Course {
+  if (!course) return course;
+  if (!course.brainCovered) {
+    course.brainCovered = [];
+  }
+  if (!course.brainUsedTerms) {
+    course.brainUsedTerms = [];
+  }
+  // If brainCovered is empty but lessonDocs has entries, backfill from lessonDocs
+  if (course.brainCovered.length === 0 && course.lessonDocs) {
+    const used = new Set<string>(course.brainUsedTerms);
+    for (const [key, doc] of Object.entries(course.lessonDocs)) {
+      if (doc) {
+        let title = key;
+        const parts = key.split(/[:-]/).map((n) => parseInt(n, 10));
+        if (
+          parts.length === 2 &&
+          course.outline?.modules?.[parts[0]]?.lessons?.[parts[1]]
+        ) {
+          title = course.outline.modules[parts[0]].lessons[parts[1]];
+        }
+        const digest = doc.digest || `${doc.goal || ""} ${doc.takeaway || ""}`.trim();
+        if (digest && !course.brainCovered.some((c) => c.title === title)) {
+          course.brainCovered.push({ title, digest });
+        }
+        if (Array.isArray(doc.terms)) {
+          for (const t of doc.terms) {
+            if (t && typeof t === "string") used.add(t.toLowerCase().trim());
+          }
+        }
+      }
+    }
+    course.brainUsedTerms = Array.from(used);
+  }
+  return course;
 }
 
 export const Store = {
@@ -146,7 +188,9 @@ export const Store = {
   },
 
   async getCourse(slug: string): Promise<Course | null> {
-    return kvSafeGet<Course | null>(`taiv1.course::${slug}`, null);
+    const c = kvSafeGet<Course | null>(`taiv1.course::${slug}`, null);
+    if (c) migrateCourseBrain(c);
+    return c;
   },
 
   async saveCourse(course: Course) {
