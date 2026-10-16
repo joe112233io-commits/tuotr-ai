@@ -23,6 +23,8 @@ export const CourseDetail: React.FC<CourseDetailProps> = ({ slug, currentLang, n
   const [progress, setProgress] = useState<{ done: string[]; quiz: any }>({ done: [], quiz: {} });
   const [lessonHtml, setLessonHtml] = useState("");
   const [lessonLoading, setLessonLoading] = useState(false);
+  const [liveThought, setLiveThought] = useState("");
+  const [liveContent, setLiveContent] = useState("");
   const [lessonError, setLessonError] = useState<string | null>(null);
   const [quizData, setQuizData] = useState<any[] | null>(null);
   const [quizError, setQuizError] = useState<string | null>(null);
@@ -150,7 +152,8 @@ export const CourseDetail: React.FC<CourseDetailProps> = ({ slug, currentLang, n
     setMissingSequenceLessons([]);
     setLessonLoading(true);
     setLessonHtml("");
-    let streamingHtml = "";
+    setLiveThought("");
+    setLiveContent("");
 
     try {
       const personal = course.personal ? await Store.getPersonalization() : null;
@@ -203,8 +206,10 @@ export const CourseDetail: React.FC<CourseDetailProps> = ({ slug, currentLang, n
         personal,
         course.lang || currentLang,
         (chunk) => {
-          streamingHtml += chunk;
-          setLessonHtml(streamingHtml);
+          setLiveContent((prev) => prev + chunk);
+        },
+        (thoughtChunk) => {
+          setLiveThought((prev) => prev + thoughtChunk);
         },
         {
           slug,
@@ -1012,11 +1017,54 @@ export const CourseDetail: React.FC<CourseDetailProps> = ({ slug, currentLang, n
                 )}
 
                 {lessonLoading && (
-                  <div style={{ textAlign: "center", padding: "40px 0" }}>
-                    <div className="spinner"></div>
-                    <p className="pulse" style={{ marginTop: 12, fontWeight: 600, color: "var(--alpha)" }}>
-                      {t("writingLesson")}
-                    </p>
+                  <div style={{ margin: "16px 0", padding: "20px 24px", background: "linear-gradient(180deg, #fafafa 0%, #ffffff 100%)", border: "1.5px solid var(--line)", borderRadius: 16, boxShadow: "0 4px 20px -8px rgba(0,0,0,0.06)" }}>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16, flexWrap: "wrap", gap: 10 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                        <span className="pulse" style={{ width: 10, height: 10, borderRadius: "50%", background: "#10b981", display: "inline-block" }}></span>
+                        <span style={{ fontWeight: 800, fontSize: 15, color: "var(--alpha)" }}>
+                          {isAr ? "🔴 بث مباشر للتوليد والتحليل البيداغوجي" : "🔴 Live Pedagogical Generation Stream"}
+                        </span>
+                      </div>
+                      <span style={{ fontSize: 12, fontWeight: 700, background: "var(--bg)", border: "1px solid var(--line)", padding: "4px 10px", borderRadius: 20, color: "var(--muted)" }}>
+                        {curLessonTitle}
+                      </span>
+                    </div>
+
+                    {/* LIVE THOUGHT STREAM PANEL */}
+                    {Boolean(liveThought) && (
+                      <div style={{ marginBottom: 16, background: "#0f172a", borderRadius: 12, border: "1px solid #1e293b", overflow: "hidden" }}>
+                        <div style={{ padding: "10px 14px", background: "#1e293b", display: "flex", alignItems: "center", gap: 8, color: "#38bdf8", fontSize: 12, fontWeight: 800 }}>
+                          <span style={{ fontSize: 15 }}>🧠</span>
+                          <span>{isAr ? "عملية التفكير واستحضار المعارف (Mind Stream):" : "Model Thought Process & Knowledge Synthesis:"}</span>
+                        </div>
+                        <div style={{ padding: 14, maxHeight: 180, overflowY: "auto", fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace", fontSize: 12, color: "#94a3b8", lineHeight: 1.6, whiteSpace: "pre-wrap" }}>
+                          {liveThought}
+                          <span className="pulse" style={{ display: "inline-block", width: 6, height: 14, background: "#38bdf8", marginLeft: 4, verticalAlign: "middle" }}></span>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* LIVE TEXT WRITING PANEL */}
+                    <div style={{ background: "#ffffff", border: "1px solid var(--line)", borderRadius: 12, padding: 18 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--muted)", fontSize: 13, fontWeight: 700, marginBottom: 12 }}>
+                        <span style={{ fontSize: 16 }}>✍️</span>
+                        <span>{isAr ? "جاري كِتابة صلب الدرس وبنيته البيداغوجية..." : "Writing lesson content & structure live..."}</span>
+                      </div>
+
+                      {liveContent ? (
+                        <div style={{ fontFamily: "inherit", fontSize: 14, lineHeight: 1.8, color: "#1e293b", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                          {liveContent}
+                          <span className="pulse" style={{ display: "inline-block", width: 8, height: 16, background: "var(--alpha)", marginLeft: 2, verticalAlign: "middle" }}></span>
+                        </div>
+                      ) : (
+                        <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 0", color: "var(--muted)" }}>
+                          <div className="spinner" style={{ width: 20, height: 20, borderWidth: 2 }}></div>
+                          <span style={{ fontSize: 13, fontWeight: 600 }}>
+                            {isAr ? "جاري الاتصال بمزود الذكاء الاصطناعي وبدء التدفق المباشر..." : "Connecting to AI model & starting stream..."}
+                          </span>
+                        </div>
+                      )}
+                    </div>
                   </div>
                 )}
 

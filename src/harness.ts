@@ -92,6 +92,8 @@ export type TransportFn = (opts: {
   instruction: string;
   temperature?: number;
   stopSequences?: string[];
+  onChunk?: (chunk: string) => void;
+  onThought?: (thought: string) => void;
 }) => Promise<string>;
 
 let transport: TransportFn | null = null;
@@ -985,7 +987,9 @@ export async function askJSON<T>(
   buildPrompt: (correctionNote?: string) => string,
   validator: (obj: any) => { valid: boolean; errors: string[]; outline?: T; glossary?: T; doc?: T; items?: T; cards?: T },
   retries = 2,
-  temperature = 0.2
+  temperature = 0.2,
+  onChunk?: (chunk: string) => void,
+  onThought?: (thought: string) => void
 ): Promise<T> {
   if (!transport) {
     throw new HarnessError(stage, ["AI transport layer is not connected. Call setTransport first."]);
@@ -1009,7 +1013,7 @@ export async function askJSON<T>(
     const instruction = buildPrompt(correctionNote);
 
     try {
-      const raw = await transport({ instruction, temperature });
+      const raw = await transport({ instruction, temperature, onChunk, onThought });
       lastRaw = raw;
 
       if (!raw || !raw.trim()) {
@@ -1433,6 +1437,8 @@ export async function writeLesson(
     introduces?: string[];
     prerequisites?: string[];
     reinforces?: string[];
+    onChunk?: (chunk: string) => void;
+    onThought?: (thought: string) => void;
   },
   lang: string
 ): Promise<LessonDoc> {
@@ -1545,7 +1551,9 @@ ${correctionNote || ""}
         reinforces: reinforcesList,
       }),
     2,
-    0.2
+    0.2,
+    ctx.onChunk,
+    ctx.onThought
   );
 }
 

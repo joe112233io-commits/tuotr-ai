@@ -254,6 +254,238 @@ async function startServer() {
     });
   });
 
+  // AI Streaming Generation Proxy (SSE) with thought/reasoning & text support
+  app.post("/api/ai/generate-stream", async (req, res) => {
+    const {
+      instruction,
+      model,
+      customApiKey,
+      customBaseUrl,
+      providerType,
+      stopSequences,
+      temperature,
+    } = req.body;
+
+    if (!instruction || typeof instruction !== "string") {
+      res.status(400).json({ error: "Instruction string is required" });
+      return;
+    }
+
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
+    res.setHeader("Connection", "keep-alive");
+
+    const sendEvent = (event: { type: "thought" | "text" | "done" | "error"; text?: string; error?: string }) => {
+      res.write(`data: ${JSON.stringify(event)}\n\n`);
+    };
+
+    const tempVal = typeof temperature === "number" ? Math.max(0, Math.min(2, temperature)) : 0.2;
+
+    // 1. Custom Provider Stream
+    if (customBaseUrl) {
+      const urlCheck = validateCustomUrl(String(customBaseUrl).trim());
+      if (!urlCheck.ok) {
+        sendEvent({ type: "error", error: `SSRF Policy Violation: ${urlCheck.reason}` });
+        res.end();
+        return;
+      }
+
+      try {
+        let cleanBase = String(customBaseUrl).trim().replace(/\/+$/, "");
+        cleanBase = cleanBase.replace(/\/chat\/completions$/, "").replace(/\/messages$/, "");
+
+        if (providerType === "anthropic") {
+          const headers: Record<string, string> = {
+            "Content-Type": "application/json",
+            "anthropic-version": "2023-06-01",
+            "anthropic-dangerous-direct-browser-access": "true",
+          };
+          if (customApiKey) headers["x-api-key"] = customApiKey;
+
+          const resp = await fetch(`${cleanBase}/messages`, {
+            method: "POST",
+            headers,
+            body: JSON.stringify({
+              model: model || "claude-3-5-sonnet-20241022",
+              max_tokens: 4000,
+              temperature: tempVal,
+              messages: [{ role: "user", content: instruction }],
+              stop_sequences: stopSequences || undefined,
+              stream: true,
+            }),
+          });
+
+          if (!resp.ok) {
+            const rawErr = await resp.text();
+            sendEvent({ type: "error", error: `Anthropic HTTP ${resp.status}: ${rawErr.slice(0, 150)}` });
+            res.end();
+            return;
+          }
+
+          if (resp.body) {
+            const reader = resp.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = "";
+
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              buffer += decoder.decode(value, { stream: true });
+              const lines = buffer.split("\n");
+              buffer = lines.pop() || "";
+
+              for (const line of lines) {
+                const trimmed = line.trim();
+                if (trimmed.startsWith("data: ")) {
+                  const dataStr = trimmed.slice(6);
+                  if (dataStr === "[DONE]") continue;
+                  try {
+                    const parsed = JSON.parse(dataStr);
+                    if (parsed.type === "content_block_delta") {
+                      if (parsed.delta?.type === "thinking_delta" && parsed.delta?.thinking) {
+                        sendEvent({ type: "thought", text: parsed.delta.thinking });
+                      } else if (parsed.delta?.text) {
+                        sendEvent({ type: "text", text: parsed.delta.text });
+                      }
+                    }
+                  } catch (e) {}
+                }
+              }
+            }
+          }
+          sendEvent({ type: "done" });
+          res.end();
+          return;
+        } else {
+          // OpenAI / DeepSeek / Groq / OpenRouter
+          const headers: Record<string, string> = {
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://tutorai.me",
+            "X-Title": "TutorAI",
+          };
+          if (customApiKey) headers["Authorization"] = `Bearer ${customApiKey}`;
+
+          const resp = await fetch(`${cleanBase}/chat/completions`, {
+            method: "POST",
+            headers,
+            body: JSON.stringify({
+              model: model || "gpt-4o-mini",
+              temperature: tempVal,
+              messages: [{ role: "user", content: instruction }],
+              stop: stopSequences || undefined,
+              stream: true,
+            }),
+          });
+
+          if (!resp.ok) {
+            const rawErr = await resp.text();
+            sendEvent({ type: "error", error: `Provider HTTP ${resp.status}: ${rawErr.slice(0, 150)}` });
+            res.end();
+            return;
+          }
+
+          if (resp.body) {
+            const reader = resp.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = "";
+
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              buffer += decoder.decode(value, { stream: true });
+              const lines = buffer.split("\n");
+              buffer = lines.pop() || "";
+
+              for (const line of lines) {
+                const trimmed = line.trim();
+                if (trimmed.startsWith("data: ")) {
+                  const dataStr = trimmed.slice(6);
+                  if (dataStr === "[DONE]") continue;
+                  try {
+                    const parsed = JSON.parse(dataStr);
+                    const delta = parsed.choices?.[0]?.delta;
+                    if (delta) {
+                      const reasoning = delta.reasoning_content || delta.reasoning || delta.thought;
+                      if (reasoning) {
+                        sendEvent({ type: "thought", text: reasoning });
+                      }
+                      if (delta.content) {
+                        sendEvent({ type: "text", text: delta.content });
+                      }
+                    }
+                  } catch (e) {}
+                }
+              }
+            }
+          }
+          sendEvent({ type: "done" });
+          res.end();
+          return;
+        }
+      } catch (err: any) {
+        sendEvent({ type: "error", error: err.message || String(err) });
+        res.end();
+        return;
+      }
+    }
+
+    // 2. Server-side Gemini Streaming
+    if (process.env.GEMINI_API_KEY) {
+      try {
+        if (!aiClient) {
+          aiClient = new GoogleGenAI({
+            apiKey: process.env.GEMINI_API_KEY,
+            httpOptions: { headers: { "User-Agent": "aistudio-build" } },
+          });
+        }
+
+        const candidateModels = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-3.8-flash"];
+        let lastErr = "";
+
+        for (const candidate of candidateModels) {
+          try {
+            const stream = await aiClient.models.generateContentStream({
+              model: candidate,
+              contents: instruction,
+              config: { temperature: tempVal },
+            });
+
+            for await (const chunk of stream) {
+              const parts = chunk.candidates?.[0]?.content?.parts;
+              if (parts && parts.length > 0) {
+                for (const p of parts) {
+                  if ((p as any).thought || (p as any).reasoning) {
+                    sendEvent({ type: "thought", text: (p as any).thought || (p as any).reasoning });
+                  }
+                  if (p.text) {
+                    sendEvent({ type: "text", text: p.text });
+                  }
+                }
+              } else if (chunk.text) {
+                sendEvent({ type: "text", text: chunk.text });
+              }
+            }
+            sendEvent({ type: "done" });
+            res.end();
+            return;
+          } catch (mErr: any) {
+            lastErr = mErr.message || String(mErr);
+          }
+        }
+        sendEvent({ type: "error", error: `Gemini failed: ${lastErr}` });
+        res.end();
+        return;
+      } catch (gErr: any) {
+        sendEvent({ type: "error", error: gErr.message || String(gErr) });
+        res.end();
+        return;
+      }
+    }
+
+    sendEvent({ type: "error", error: "No AI provider configured." });
+    res.end();
+  });
+
   // Endpoint to fetch available models from custom AI provider
   app.post("/api/ai/models", async (req, res) => {
     const { customBaseUrl, customApiKey, providerType } = req.body;

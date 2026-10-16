@@ -408,6 +408,74 @@ export const AIProvider = {
     return text;
   },
 
+  async generateStream(opts: {
+    instruction: string;
+    temperature?: number;
+    stopSequences?: string[];
+    onChunk?: (chunk: string) => void;
+    onThought?: (thought: string) => void;
+  }): Promise<string> {
+    const s = this.settings;
+    let fullText = "";
+
+    try {
+      const resp = await fetch("/api/ai/generate-stream", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          instruction: opts.instruction,
+          model: s.enabled ? s.model : undefined,
+          customApiKey: s.enabled ? s.apiKey : undefined,
+          customBaseUrl: s.enabled ? s.baseUrl : undefined,
+          providerType: s.enabled ? this.presetType() : undefined,
+          stopSequences: opts.stopSequences,
+          temperature: typeof opts.temperature === "number" ? opts.temperature : s.temperature ?? 0.2,
+        }),
+      });
+
+      if (!resp.ok) {
+        return await this.generate(opts);
+      }
+
+      if (resp.body) {
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop() || "";
+
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (trimmed.startsWith("data: ")) {
+              try {
+                const event = JSON.parse(trimmed.slice(6));
+                if (event.type === "thought" && event.text) {
+                  opts.onThought?.(event.text);
+                } else if (event.type === "text" && event.text) {
+                  fullText += event.text;
+                  opts.onChunk?.(event.text);
+                } else if (event.type === "error" && event.error) {
+                  console.warn("[AIProvider] Stream event error:", event.error);
+                }
+              } catch (e) {}
+            }
+          }
+        }
+      }
+
+      if (fullText.trim()) return fullText;
+    } catch (err) {
+      console.warn("[AIProvider] Stream failed, falling back to generate:", err);
+    }
+
+    return await this.generate(opts);
+  },
+
   async test() {
     const s = this.settings;
     if (!s.baseUrl || !s.model) throw new Error("need-fields");
@@ -570,8 +638,8 @@ export const AIProvider = {
   },
 };
 
-// Wire harness transport to AIProvider.generate
-setTransport((opts) => AIProvider.generate(opts));
+// Wire harness transport to AIProvider.generateStream
+setTransport((opts) => AIProvider.generateStream(opts));
 
 /* ========================================================
    COURSE AI LAYER (Strictly powered by harness)
@@ -591,6 +659,7 @@ export const CourseAI = {
     personal: any,
     lang: string = "en",
     onChunk?: (chunk: string) => void,
+    onThought?: (thought: string) => void,
     ctx?: {
       slug: string;
       lessonIndex: number;
@@ -673,6 +742,8 @@ export const CourseAI = {
         introduces: lessonIntroduces,
         prerequisites: lessonPrereqs,
         reinforces: lessonReinforces,
+        onChunk,
+        onThought,
       },
       lang
     );
