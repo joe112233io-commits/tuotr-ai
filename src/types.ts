@@ -1,4 +1,13 @@
-import { LessonDoc, Term } from "./harness";
+import {
+  LessonDoc,
+  Term,
+  Outline,
+  OutlineModule,
+  LessonOutlineItem,
+  ConceptGraph,
+  ConceptGraphNode,
+  ConceptGraphEdge,
+} from "./harness";
 
 export interface User {
   email: string;
@@ -9,17 +18,10 @@ export interface User {
   lang?: string;
 }
 
-export interface ModuleData {
-  title: string;
-  lessons: string[];
-}
-
-export interface CourseOutline {
-  title: string;
-  summary: string;
-  outcomes: string[];
-  modules: ModuleData[];
-}
+export type CourseOutline = Outline;
+export type ModuleData = OutlineModule;
+export type LessonItem = LessonOutlineItem;
+export type { ConceptGraph, ConceptGraphNode, ConceptGraphEdge };
 
 export interface Course {
   slug: string;
@@ -35,6 +37,7 @@ export interface Course {
   glossary?: Term[];
   brainCovered?: { title: string; digest: string }[];
   brainUsedTerms?: string[];
+  conceptGraph?: ConceptGraph;
   lang: string;
 }
 

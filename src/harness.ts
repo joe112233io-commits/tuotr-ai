@@ -30,11 +30,42 @@ export interface Term {
   def: string;
 }
 
+export interface LessonOutlineItem {
+  title: string;
+  prerequisites: string[];
+  introduces: string[];
+  reinforces: string[];
+}
+
+export interface OutlineModule {
+  title: string;
+  lessons: string[];
+  lessonItems?: LessonOutlineItem[];
+}
+
+export interface ConceptGraphNode {
+  id: string;
+  label: string;
+  introducedIn: string;
+}
+
+export interface ConceptGraphEdge {
+  from: string;
+  to: string;
+  type: "prereq" | "reinforces";
+}
+
+export interface ConceptGraph {
+  nodes: ConceptGraphNode[];
+  edges: ConceptGraphEdge[];
+}
+
 export interface Outline {
   title: string;
   summary: string;
   outcomes: string[];
-  modules: { title: string; lessons: string[] }[];
+  modules: OutlineModule[];
+  conceptDependencies?: Record<string, { prerequisites: string[]; introduces: string[]; reinforces: string[] }>;
 }
 
 export interface QuizItem {
@@ -195,7 +226,126 @@ export function esc(str: any): string {
    VALIDATORS
    ======================================================== */
 
-export function validateOutline(raw: any, lang: string): { valid: boolean; errors: string[]; outline?: Outline } {
+export function buildConceptGraph(outline: Outline): ConceptGraph {
+  const nodesMap = new Map<string, ConceptGraphNode>();
+  const edges: ConceptGraphEdge[] = [];
+  const edgeKeys = new Set<string>();
+
+  if (!outline || !Array.isArray(outline.modules)) {
+    return { nodes: [], edges: [] };
+  }
+
+  for (const m of outline.modules) {
+    if (m.lessonItems && Array.isArray(m.lessonItems)) {
+      for (const item of m.lessonItems) {
+        for (const intro of item.introduces || []) {
+          const id = normalizeTerm(intro);
+          if (id && !nodesMap.has(id)) {
+            nodesMap.set(id, { id, label: intro, introducedIn: item.title });
+          }
+        }
+        for (const prereq of item.prerequisites || []) {
+          const pId = normalizeTerm(prereq);
+          if (pId && !nodesMap.has(pId)) {
+            nodesMap.set(pId, { id: pId, label: prereq, introducedIn: "Foundational" });
+          }
+          for (const intro of item.introduces || []) {
+            const toId = normalizeTerm(intro);
+            const edgeKey = `prereq::${pId}::${toId}`;
+            if (pId && toId && !edgeKeys.has(edgeKey)) {
+              edgeKeys.add(edgeKey);
+              edges.push({ from: pId, to: toId, type: "prereq" });
+            }
+          }
+        }
+        for (const reinf of item.reinforces || []) {
+          const rId = normalizeTerm(reinf);
+          for (const intro of item.introduces || []) {
+            const toId = normalizeTerm(intro);
+            const edgeKey = `reinforces::${rId}::${toId}`;
+            if (rId && toId && !edgeKeys.has(edgeKey)) {
+              edgeKeys.add(edgeKey);
+              edges.push({ from: rId, to: toId, type: "reinforces" });
+            }
+          }
+        }
+      }
+    } else if (outline.conceptDependencies) {
+      for (const [title, dep] of Object.entries(outline.conceptDependencies)) {
+        for (const intro of dep.introduces || []) {
+          const id = normalizeTerm(intro);
+          if (id && !nodesMap.has(id)) {
+            nodesMap.set(id, { id, label: intro, introducedIn: title });
+          }
+        }
+        for (const prereq of dep.prerequisites || []) {
+          const pId = normalizeTerm(prereq);
+          if (pId && !nodesMap.has(pId)) {
+            nodesMap.set(pId, { id: pId, label: prereq, introducedIn: "Foundational" });
+          }
+          for (const intro of dep.introduces || []) {
+            const toId = normalizeTerm(intro);
+            const edgeKey = `prereq::${pId}::${toId}`;
+            if (pId && toId && !edgeKeys.has(edgeKey)) {
+              edgeKeys.add(edgeKey);
+              edges.push({ from: pId, to: toId, type: "prereq" });
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return {
+    nodes: Array.from(nodesMap.values()),
+    edges,
+  };
+}
+
+function checkConceptGraphCycles(lessons: LessonOutlineItem[]): boolean {
+  const adj = new Map<string, Set<string>>();
+  for (const l of lessons) {
+    for (const p of l.prerequisites) {
+      const pNorm = normalizeTerm(p);
+      if (!adj.has(pNorm)) adj.set(pNorm, new Set());
+      for (const intro of l.introduces) {
+        const iNorm = normalizeTerm(intro);
+        if (pNorm && iNorm && pNorm !== iNorm) {
+          adj.get(pNorm)!.add(iNorm);
+        }
+      }
+    }
+  }
+
+  const state = new Map<string, number>();
+
+  function dfs(node: string): boolean {
+    state.set(node, 1);
+    const neighbors = adj.get(node);
+    if (neighbors) {
+      for (const next of neighbors) {
+        const s = state.get(next) || 0;
+        if (s === 1) return true;
+        if (s === 0 && dfs(next)) return true;
+      }
+    }
+    state.set(node, 2);
+    return false;
+  }
+
+  for (const node of adj.keys()) {
+    if ((state.get(node) || 0) === 0) {
+      if (dfs(node)) return true;
+    }
+  }
+  return false;
+}
+
+export function validateOutline(
+  raw: any,
+  lang: string,
+  ctx?: { glossary?: Term[] }
+): { valid: boolean; errors: string[]; outline?: Outline } {
   const errors: string[] = [];
   if (!raw || typeof raw !== "object") {
     return { valid: false, errors: ["Outline must be a valid JSON object."] };
@@ -211,10 +361,16 @@ export function validateOutline(raw: any, lang: string): { valid: boolean; error
     errors.push("Outline outcomes must contain at least 3 clear learning objectives.");
   }
 
+  const parsedModules: OutlineModule[] = [];
+  const conceptDependencies: Record<string, { prerequisites: string[]; introduces: string[]; reinforces: string[] }> = {};
+  const allLessonItems: LessonOutlineItem[] = [];
+
   if (!Array.isArray(raw.modules) || raw.modules.length < 2) {
     errors.push("Outline must contain at least 2 modules.");
   } else {
     const lessonTitleMap = new Map<string, string>();
+    const introducedConceptsMap = new Map<string, string>();
+
     raw.modules.forEach((mod: any, mIdx: number) => {
       const modTitle = String(mod?.title || "").trim();
       if (modTitle.length < 2) {
@@ -223,19 +379,147 @@ export function validateOutline(raw: any, lang: string): { valid: boolean; error
       if (!Array.isArray(mod?.lessons) || mod.lessons.length < 2) {
         errors.push(`Module ${mIdx + 1} ("${modTitle}") must contain at least 2 distinct lessons.`);
       } else {
+        const modLessonTitles: string[] = [];
+        const modLessonItems: LessonOutlineItem[] = [];
+
         mod.lessons.forEach((l: any, lIdx: number) => {
-          const lesTitle = String(l || "").trim().toLowerCase();
+          let lesTitle = "";
+          let prereqs: string[] = [];
+          let intros: string[] = [];
+          let reinfs: string[] = [];
+
+          if (typeof l === "string") {
+            lesTitle = l.trim();
+            intros = [lesTitle];
+          } else if (l && typeof l === "object") {
+            lesTitle = String(l.title || "").trim();
+            if (!Array.isArray(l.prerequisites)) {
+              errors.push(`Lesson "${lesTitle || lIdx + 1}" in Module ${mIdx + 1} must declare prerequisites as an array.`);
+            } else {
+              prereqs = l.prerequisites.map((p: any) => String(p).trim()).filter(Boolean);
+            }
+            if (!Array.isArray(l.introduces)) {
+              errors.push(`Lesson "${lesTitle || lIdx + 1}" in Module ${mIdx + 1} must declare introduces as an array.`);
+            } else {
+              intros = l.introduces.map((i: any) => String(i).trim()).filter(Boolean);
+            }
+            if (!Array.isArray(l.reinforces)) {
+              errors.push(`Lesson "${lesTitle || lIdx + 1}" in Module ${mIdx + 1} must declare reinforces as an array.`);
+            } else {
+              reinfs = l.reinforces.map((r: any) => String(r).trim()).filter(Boolean);
+            }
+          } else {
+            errors.push(`Lesson ${lIdx + 1} in Module ${mIdx + 1} has an invalid structure.`);
+          }
+
           if (lesTitle.length < 2) {
             errors.push(`Lesson ${lIdx + 1} in Module ${mIdx + 1} has an invalid title.`);
           }
-          if (lessonTitleMap.has(lesTitle)) {
-            errors.push(`Duplicate lesson title detected: "${l}" in Module ${mIdx + 1} (already used in ${lessonTitleMap.get(lesTitle)}).`);
+          const lowerTitle = lesTitle.toLowerCase();
+          if (lessonTitleMap.has(lowerTitle)) {
+            errors.push(`Duplicate lesson title detected: "${lesTitle}" in Module ${mIdx + 1} (already used in ${lessonTitleMap.get(lowerTitle)}).`);
           } else {
-            lessonTitleMap.set(lesTitle, `Module ${mIdx + 1}`);
+            lessonTitleMap.set(lowerTitle, `Module ${mIdx + 1}`);
           }
+
+          const lessonItem: LessonOutlineItem = {
+            title: lesTitle,
+            prerequisites: prereqs,
+            introduces: intros,
+            reinforces: reinfs,
+          };
+
+          // Self-conflict in same lesson
+          for (const c of intros) {
+            const normC = normalizeTerm(c);
+            if (normC) {
+              if (prereqs.some((p) => normalizeTerm(p) === normC)) {
+                errors.push(`Lesson "${lesTitle}" has circular concept "${c}": cannot be both a prerequisite and introduced in the same lesson.`);
+              }
+              if (reinfs.some((r) => normalizeTerm(r) === normC)) {
+                errors.push(`Lesson "${lesTitle}" has conflicting concept "${c}": cannot be both introduced for the first time and reinforced in the same lesson.`);
+              }
+            }
+          }
+
+          // Chronological DAG validation
+          // 1. Concept in introduces must be introduced only once across entire course
+          for (const intro of intros) {
+            const normIntro = normalizeTerm(intro);
+            if (normIntro) {
+              if (introducedConceptsMap.has(normIntro)) {
+                errors.push(`Duplicate concept introduction: "${intro}" in "${lesTitle}" was already introduced in earlier lesson "${introducedConceptsMap.get(normIntro)}".`);
+              } else {
+                introducedConceptsMap.set(normIntro, lesTitle);
+              }
+            }
+          }
+
+          // 2. Prerequisites must have been introduced in an earlier lesson (or exist in glossary if provided)
+          for (const p of prereqs) {
+            const normP = normalizeTerm(p);
+            if (normP) {
+              const introducedBefore = introducedConceptsMap.has(normP) && introducedConceptsMap.get(normP) !== lesTitle;
+              const inGlossary = ctx?.glossary ? ctx.glossary.some((g) => normalizeTerm(g.term) === normP) : false;
+              if (!introducedBefore && !inGlossary) {
+                errors.push(`Lesson "${lesTitle}" has prerequisite "${p}" which has not been introduced in any preceding lesson.`);
+              }
+            }
+          }
+
+          // 3. Reinforces must have been introduced in an earlier lesson (or exist in glossary if provided)
+          for (const r of reinfs) {
+            const normR = normalizeTerm(r);
+            if (normR) {
+              const introducedBefore = introducedConceptsMap.has(normR) && introducedConceptsMap.get(normR) !== lesTitle;
+              const inGlossary = ctx?.glossary ? ctx.glossary.some((g) => normalizeTerm(g.term) === normR) : false;
+              if (!introducedBefore && !inGlossary) {
+                errors.push(`Lesson "${lesTitle}" reinforces concept "${r}" which has not been introduced in any preceding lesson.`);
+              }
+            }
+          }
+
+          // 4. Glossary lock validation if glossary provided
+          if (ctx?.glossary && ctx.glossary.length > 0) {
+            const glossaryNorms = new Set(ctx.glossary.map((g) => normalizeTerm(g.term)));
+            for (const p of prereqs) {
+              if (!glossaryNorms.has(normalizeTerm(p))) {
+                errors.push(`Lesson "${lesTitle}" contains unrecognized prerequisite concept "${p}" that is not in the course glossary.`);
+              }
+            }
+            for (const intro of intros) {
+              if (!glossaryNorms.has(normalizeTerm(intro))) {
+                errors.push(`Lesson "${lesTitle}" contains unrecognized introduced concept "${intro}" that is not in the course glossary.`);
+              }
+            }
+            for (const reinf of reinfs) {
+              if (!glossaryNorms.has(normalizeTerm(reinf))) {
+                errors.push(`Lesson "${lesTitle}" contains unrecognized reinforced concept "${reinf}" that is not in the course glossary.`);
+              }
+            }
+          }
+
+          modLessonTitles.push(lesTitle);
+          modLessonItems.push(lessonItem);
+          allLessonItems.push(lessonItem);
+          conceptDependencies[lesTitle] = {
+            prerequisites: prereqs,
+            introduces: intros,
+            reinforces: reinfs,
+          };
+        });
+
+        parsedModules.push({
+          title: modTitle,
+          lessons: modLessonTitles,
+          lessonItems: modLessonItems,
         });
       }
     });
+
+    if (checkConceptGraphCycles(allLessonItems)) {
+      errors.push("Circular dependency cycle detected in course concept network.");
+    }
   }
 
   if (lang === "ar" && title) {
@@ -251,10 +535,8 @@ export function validateOutline(raw: any, lang: string): { valid: boolean; error
       title,
       summary,
       outcomes: raw.outcomes.map((o: any) => String(o).trim()),
-      modules: raw.modules.map((m: any) => ({
-        title: String(m.title).trim(),
-        lessons: m.lessons.map((l: any) => String(l).trim()),
-      })),
+      modules: parsedModules,
+      conceptDependencies,
     },
   };
 }
@@ -296,8 +578,11 @@ export function validateLesson(
   ctx: {
     lang: string;
     difficulty: "beginner" | "intermediate" | "advanced";
-    glossary: Term[];
-    previous: { title: string; digest: string }[];
+    glossary?: Term[];
+    previous?: { title: string; digest: string }[];
+    introduces?: string[];
+    prerequisites?: string[];
+    reinforces?: string[];
   }
 ): { valid: boolean; errors: string[]; doc?: LessonDoc } {
   const errors: string[] = [];
@@ -522,6 +807,43 @@ export function validateLesson(
       if (copyRatio > 0.08 || digestCopyRatio > 0.5) {
         errors.push(`Excessive overlap detected with previous lesson "${prev.title}". Do not repeat prior content; cover new material.`);
         break;
+      }
+    }
+  }
+
+  // Active Concept Context & Scaffolding Checks
+  const normalizedFullText = normalizeTerm(fullTextAccumulator);
+
+  // 1. Target concepts check: lesson MUST actively cover and introduce concepts in ctx.introduces
+  if (ctx.introduces && ctx.introduces.length > 0) {
+    for (const concept of ctx.introduces) {
+      const normC = normalizeTerm(concept);
+      if (normC && !normalizedFullText.includes(normC)) {
+        errors.push(`Lesson failed to introduce declared target concept: "${concept}".`);
+      }
+    }
+  }
+
+  // 2. Prerequisite check: lesson must NOT re-define prerequisite concepts from scratch
+  if (ctx.prerequisites && ctx.prerequisites.length > 0) {
+    for (const prereq of ctx.prerequisites) {
+      const normP = normalizeTerm(prereq);
+      if (!normP || normP.length < 2) continue;
+
+      for (const b of blocks) {
+        if (b.k === "p") {
+          const rawPText = String(b.t || "").toLowerCase();
+          const normPText = normalizeTerm(b.t);
+          const escapedNorm = normP.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          const arReDef = new RegExp(`(^|\\n|\\.|،|؛|\\s)(تعريف\\s+(?:ال)?${escapedNorm}|(?:ال)?${escapedNorm}\\s+(?:هو|هي|عبارة عن|يعرف بانه|يقصد به))`, "i");
+          const enReDef = new RegExp(`(^|\\n|\\.|,\\s)(${escapedNorm}\\s+(?:is defined as|is a|is an|refers to|means)|definition of\\s+${escapedNorm})`, "i");
+          if (arReDef.test(normPText) || arReDef.test(rawPText) || enReDef.test(normPText) || enReDef.test(rawPText)) {
+            errors.push(
+              `Lesson redundantly re-defines prerequisite concept "${prereq}" from scratch instead of assuming student mastery and building upon it.`
+            );
+            break;
+          }
+        }
       }
     }
   }
@@ -932,7 +1254,7 @@ export async function designOutline(
     "designOutline",
     (correctionNote) => `
 You are TutorAI, an elite curriculum designer.
-TASK: Design a rigorous, multi-module course curriculum outline for the topic below.
+TASK: Design a rigorous, multi-module course curriculum outline with an explicit Concept Dependency Network (DAG) for the topic below.
 
 TOPIC: ${topic}
 TARGET DIFFICULTY: ${difficulty}
@@ -949,7 +1271,14 @@ Output ONLY a single valid JSON object strictly matching this schema:
   "modules": [
     {
       "title": string,
-      "lessons": [string, string] (at least 2 distinct lesson titles per module)
+      "lessons": [
+        {
+          "title": string (unique lesson title),
+          "prerequisites": [string], // Concepts student must know before this lesson. Must come from concepts introduced in earlier lessons (or empty [] for introductory lessons).
+          "introduces": [string],    // 1 to 3 net-new concepts taught for the first time in this lesson. Must be unique across the entire course.
+          "reinforces": [string]     // Previously covered concepts that this lesson deepens or applies in a new context.
+        }
+      ]
     }
   ]
 }
@@ -959,6 +1288,11 @@ RULES:
 - Every module MUST have at least 2 distinct lessons.
 - ALL lesson titles across all modules MUST be unique (NO duplicate titles anywhere).
 - Outcomes must state verifiable skills.
+- CONCEPT DEPENDENCY RULES (Strict Pedagogical DAG):
+  1. "introduces": Each concept must be introduced in exactly ONE lesson across the entire course (no duplicate introductions).
+  2. "prerequisites": Every prerequisite must have been introduced in an EARLIER lesson (or empty [] for lesson 1). NEVER depend on a concept that has not been introduced yet.
+  3. "reinforces": Every reinforced concept must have been introduced in an EARLIER lesson.
+  4. NO circular dependencies: A concept cannot be both a prerequisite and introduced in the same lesson.
 ${correctionNote || ""}
 `,
     (raw) => validateOutline(raw, lang),
@@ -974,6 +1308,17 @@ export async function buildGlossary(
   difficulty?: string,
   source_excerpt?: string
 ): Promise<Term[]> {
+  const introducedConcepts: string[] = [];
+  if (outline.modules) {
+    for (const m of outline.modules) {
+      if (m.lessonItems) {
+        for (const item of m.lessonItems) {
+          if (Array.isArray(item.introduces)) introducedConcepts.push(...item.introduces);
+        }
+      }
+    }
+  }
+
   return askJSON<Term[]>(
     "buildGlossary",
     (correctionNote) => `
@@ -984,6 +1329,7 @@ COURSE: "${outline.title}"
 TOPIC: "${topic}"
 DIFFICULTY: ${difficulty || "beginner"}
 OUTLINE MODULES: ${outline.modules.map((m) => m.title + " (" + m.lessons.join(", ") + ")").join(" | ")}
+${introducedConcepts.length > 0 ? `KEY CONCEPTS INTRODUCED IN CURRICULUM: ${introducedConcepts.join(", ")}` : ""}
 ${source_excerpt ? `SOURCE EXCERPT:\n${source_excerpt.slice(0, 1500)}` : ""}
 LANGUAGE: ${lang === "ar" ? "Modern Standard Arabic (الفصحى)" : "English"}
 
@@ -1017,6 +1363,9 @@ export async function writeLesson(
     difficulty: "beginner" | "intermediate" | "advanced";
     settings: any;
     brain: CourseBrain;
+    introduces?: string[];
+    prerequisites?: string[];
+    reinforces?: string[];
   },
   lang: string
 ): Promise<LessonDoc> {
@@ -1027,6 +1376,34 @@ export async function writeLesson(
 
   const glossaryNames = chain.glossary.map((g) => g.term).join(", ");
   const sourceExcerpt = ctx.settings?.source_excerpt ? `\nSOURCE REFERENCE EXCERPT:\n${ctx.settings.source_excerpt.slice(0, 2000)}` : "";
+
+  const introducesList = ctx.introduces && ctx.introduces.length > 0 ? ctx.introduces : [ctx.lessonTitle];
+  const prereqsList = ctx.prerequisites && ctx.prerequisites.length > 0 ? ctx.prerequisites : [];
+  const reinforcesList = ctx.reinforces && ctx.reinforces.length > 0 ? ctx.reinforces : [];
+
+  let prereqSection = "";
+  if (prereqsList.length > 0) {
+    const relevantPrior = chain.covered.filter((c) =>
+      prereqsList.some((p) => c.title.toLowerCase().includes(p.toLowerCase()) || c.digest.toLowerCase().includes(p.toLowerCase()))
+    );
+    const priorExcerpt = relevantPrior.length > 0
+      ? relevantPrior.map((r) => `- ${r.title}: ${r.digest}`).join("\n")
+      : prereqsList.map((p) => `- ${p} (previously mastered by learner)`).join("\n");
+
+    prereqSection = `
+PREREQUISITE CONCEPTS (ASSUMED STUDENT KNOWLEDGE):
+The student already mastered these concepts: ${prereqsList.join(", ")}
+Prior coverage:
+${priorExcerpt}
+CRITICAL INSTRUCTION: DO NOT define or explain these prerequisite concepts from scratch. The student already knows them. Assume full mastery, reference them directly, and BUILD ADVANCED KNOWLEDGE UPON THEM.`;
+  }
+
+  let reinforcesSection = "";
+  if (reinforcesList.length > 0) {
+    reinforcesSection = `
+REINFORCED CONCEPTS:
+Apply and connect these previously taught concepts to new scenarios without re-defining them: ${reinforcesList.join(", ")}`;
+  }
 
   return askJSON<LessonDoc>(
     "writeLesson",
@@ -1040,6 +1417,12 @@ LESSON TITLE: "${ctx.lessonTitle}"
 TOPIC: "${ctx.topic}"
 DIFFICULTY: ${ctx.difficulty}
 ${sourceExcerpt}
+
+ACTIVE PEDAGOGICAL MISSION:
+- TARGET NEW CONCEPTS TO INTRODUCE: ${introducesList.join(", ")}
+  (You MUST explain, define, and illustrate these target concepts thoroughly with concrete explanations and examples).
+${prereqSection}
+${reinforcesSection}
 
 ESTABLISHED COURSE GLOSSARY (Strictly lock your 'terms' to terms in this list):
 ${glossaryNames}
@@ -1078,6 +1461,7 @@ STRICT QUALITY RULES:
 5. If language is Arabic, all text, headings, and tables must be in clear Arabic.
 6. The "terms" field is strictly MANDATORY and must NOT be empty. Pick 2 to 5 applicable terms from the established glossary.
 7. The lesson text MUST actively weave in, explain, and reference the established course vocabulary (at least 30% of the terms in the glossary).
+8. Target concepts must be clearly introduced and explained; do not re-define prerequisite concepts from scratch.
 ${correctionNote || ""}
 `,
     (raw) =>
@@ -1086,6 +1470,9 @@ ${correctionNote || ""}
         difficulty: ctx.difficulty,
         glossary: chain.glossary,
         previous: chain.covered,
+        introduces: introducesList,
+        prerequisites: prereqsList,
+        reinforces: reinforcesList,
       }),
     2,
     0.2

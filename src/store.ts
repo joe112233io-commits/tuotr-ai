@@ -1,4 +1,5 @@
 import { User, Course, PersonalizationData, AISettings } from "./types";
+import { buildConceptGraph } from "./harness";
 
 const LS = {
   email: "taiv1.email_id",
@@ -84,6 +85,13 @@ export function migrateCourseBrain(course: Course): Course {
       }
     }
     course.brainUsedTerms = Array.from(used);
+  }
+  if (!course.conceptGraph) {
+    if (course.outline) {
+      course.conceptGraph = buildConceptGraph(course.outline as any);
+    } else {
+      course.conceptGraph = { nodes: [], edges: [] };
+    }
   }
   return course;
 }

@@ -4,7 +4,7 @@ import { Store } from "../store";
 import { STR, planName } from "../i18n";
 import { CourseAI } from "../ai";
 import { Course } from "../types";
-import { LessonDoc, HarnessError, rehydrate, getBrain } from "../harness";
+import { LessonDoc, HarnessError, rehydrate, getBrain, buildConceptGraph } from "../harness";
 
 interface CourseDetailProps {
   slug: string;
@@ -19,7 +19,7 @@ export const CourseDetail: React.FC<CourseDetailProps> = ({ slug, currentLang, n
   const [loading, setLoading] = useState(true);
   const [modIdx, setModIdx] = useState(0);
   const [lesIdx, setLesIdx] = useState(0);
-  const [tab, setTab] = useState<"lesson" | "quiz" | "flash" | "mind" | "chat">("lesson");
+  const [tab, setTab] = useState<"lesson" | "quiz" | "flash" | "mind" | "chat" | "concept">("lesson");
   const [progress, setProgress] = useState<{ done: string[]; quiz: any }>({ done: [], quiz: {} });
   const [lessonHtml, setLessonHtml] = useState("");
   const [lessonLoading, setLessonLoading] = useState(false);
@@ -64,6 +64,7 @@ export const CourseDetail: React.FC<CourseDetailProps> = ({ slug, currentLang, n
         const outline = await CourseAI.generateOutline(c.topic, personal, c.settings, c.lang || currentLang);
         c.outline = outline;
         c.title = outline.title || c.topic;
+        c.conceptGraph = buildConceptGraph(outline);
         await Store.saveCourse(c);
       } catch (e: any) {
         console.error("[CourseDetail] Outline generation failed:", e);
@@ -625,6 +626,7 @@ export const CourseDetail: React.FC<CourseDetailProps> = ({ slug, currentLang, n
     ["lesson", t("tabLesson")],
     ["quiz", t("tabQuiz")],
     ["flash", t("tabFlash")],
+    ["concept", isAr ? "🕸️ شبكة المفاهيم" : "🕸️ Concept Graph"],
     ["mind", t("tabMind")],
     ["chat", t("tabChat")],
   ];
@@ -714,6 +716,7 @@ export const CourseDetail: React.FC<CourseDetailProps> = ({ slug, currentLang, n
                 const idKey = `${i}:${j}`;
                 const isActive = i === modIdx && j === lesIdx;
                 const isDone = progress.done.includes(idKey);
+                const lesDep = m.lessonItems?.[j] || (course.outline?.conceptDependencies ? course.outline.conceptDependencies[l] : undefined);
                 return (
                   <button
                     key={j}
@@ -723,8 +726,26 @@ export const CourseDetail: React.FC<CourseDetailProps> = ({ slug, currentLang, n
                       setLesIdx(j);
                       setTab("lesson");
                     }}
+                    style={{ textAlign: isAr ? "right" : "left", display: "flex", flexDirection: "column", gap: 3, alignItems: "stretch", padding: "10px 14px" }}
                   >
-                    {l}
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <span>{l}</span>
+                      {isDone && <span style={{ color: "#166534", fontSize: 12 }}>✓</span>}
+                    </div>
+                    {lesDep && (lesDep.introduces?.length || lesDep.prerequisites?.length) ? (
+                      <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginTop: 2 }}>
+                        {lesDep.introduces?.slice(0, 2).map((intro, idx) => (
+                          <span key={`i-${idx}`} style={{ fontSize: 10, padding: "1px 6px", borderRadius: 4, background: "#ecfdf5", color: "#065f46", fontWeight: 700 }}>
+                            🚀 {intro}
+                          </span>
+                        ))}
+                        {lesDep.prerequisites?.slice(0, 1).map((prereq, idx) => (
+                          <span key={`p-${idx}`} style={{ fontSize: 10, padding: "1px 6px", borderRadius: 4, background: "#fef3c7", color: "#92400e", fontWeight: 700 }}>
+                            🔑 {prereq}
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
                   </button>
                 );
               })}
@@ -737,16 +758,103 @@ export const CourseDetail: React.FC<CourseDetailProps> = ({ slug, currentLang, n
             {/* LESSON TAB */}
             {tab === "lesson" && (
               <div>
-                <div style={{ borderBottom: "1px solid var(--line)", paddingBottom: 14, marginBottom: 18, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <div>
-                    <span style={{ fontSize: 12, fontWeight: 700, color: "var(--alpha)" }}>{curModule?.title}</span>
-                    <h2 style={{ margin: "4px 0 0", fontSize: 22 }}>{curLessonTitle}</h2>
+                <div style={{ borderBottom: "1px solid var(--line)", paddingBottom: 14, marginBottom: 18 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+                    <div>
+                      <span style={{ fontSize: 12, fontWeight: 700, color: "var(--alpha)" }}>{curModule?.title}</span>
+                      <h2 style={{ margin: "4px 0 0", fontSize: 22 }}>{curLessonTitle}</h2>
+                    </div>
+                    {progress.done.includes(lessonIdKey) && (
+                      <span className="badge" style={{ background: "#dcfce7", color: "#166534" }}>
+                        ✓ {isAr ? "مكتمل" : "Completed"}
+                      </span>
+                    )}
                   </div>
-                  {progress.done.includes(lessonIdKey) && (
-                    <span className="badge" style={{ background: "#dcfce7", color: "#166534" }}>
-                      ✓ {isAr ? "مكتمل" : "Completed"}
-                    </span>
-                  )}
+
+                  {/* Scaffolding Concept Badges */}
+                  {(() => {
+                    const curDep = curModule?.lessonItems?.[lesIdx] ||
+                      (course.outline?.conceptDependencies ? course.outline.conceptDependencies[curLessonTitle] : undefined);
+                    if (!curDep) return null;
+                    const hasIntro = curDep.introduces && curDep.introduces.length > 0;
+                    const hasPrereq = curDep.prerequisites && curDep.prerequisites.length > 0;
+                    const hasReinf = curDep.reinforces && curDep.reinforces.length > 0;
+                    if (!hasIntro && !hasPrereq && !hasReinf) return null;
+
+                    return (
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginTop: 12, paddingTop: 10, borderTop: "1px dashed var(--line)" }}>
+                        {hasIntro && (
+                          <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                            <span style={{ fontSize: 11, fontWeight: 800, color: "#065f46" }}>
+                              🚀 {isAr ? "مفاهيم جديدة:" : "Introduces:"}
+                            </span>
+                            {curDep.introduces?.map((intro, idx) => (
+                              <span
+                                key={`intro-${idx}`}
+                                style={{
+                                  background: "#ecfdf5",
+                                  color: "#065f46",
+                                  border: "1px solid #a7f3d0",
+                                  borderRadius: 8,
+                                  padding: "3px 9px",
+                                  fontSize: 12,
+                                  fontWeight: 700,
+                                }}
+                              >
+                                {intro}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                        {hasPrereq && (
+                          <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                            <span style={{ fontSize: 11, fontWeight: 800, color: "#92400e" }}>
+                              🔑 {isAr ? "متطلبات سابقة:" : "Prerequisites:"}
+                            </span>
+                            {curDep.prerequisites?.map((p, idx) => (
+                              <span
+                                key={`pre-${idx}`}
+                                style={{
+                                  background: "#fef3c7",
+                                  color: "#92400e",
+                                  border: "1px solid #fde68a",
+                                  borderRadius: 8,
+                                  padding: "3px 9px",
+                                  fontSize: 12,
+                                  fontWeight: 700,
+                                }}
+                              >
+                                {p}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                        {hasReinf && (
+                          <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                            <span style={{ fontSize: 11, fontWeight: 800, color: "#3730a3" }}>
+                              🔄 {isAr ? "ترسيخ مفاهيم:" : "Reinforces:"}
+                            </span>
+                            {curDep.reinforces?.map((r, idx) => (
+                              <span
+                                key={`reinf-${idx}`}
+                                style={{
+                                  background: "#e0e7ff",
+                                  color: "#3730a3",
+                                  border: "1px solid #c7d2fe",
+                                  borderRadius: 8,
+                                  padding: "3px 9px",
+                                  fontSize: 12,
+                                  fontWeight: 700,
+                                }}
+                              >
+                                {r}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
                 </div>
 
                 {lessonLoading && (
@@ -916,6 +1024,208 @@ export const CourseDetail: React.FC<CourseDetailProps> = ({ slug, currentLang, n
                     })}
                   </div>
                 ) : null}
+              </div>
+            )}
+
+            {/* CONCEPT DEPENDENCY NETWORK TAB */}
+            {tab === "concept" && (
+              <div>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12, marginBottom: 20 }}>
+                  <div>
+                    <h3 style={{ margin: "0 0 6px", fontSize: 20, display: "flex", alignItems: "center", gap: 8 }}>
+                      <span>🕸️</span>
+                      <span>{isAr ? "شبكة المفاهيم والترابط البيداغوجي" : "Concept Dependency Network"}</span>
+                    </h3>
+                    <p style={{ margin: 0, color: "var(--muted)", fontSize: 13, lineHeight: 1.5 }}>
+                      {isAr
+                        ? "مخطط التبعيات التراكمي المنطقي (DAG): يضمن تسلسل اكتساب المفاهيم خطوة بخطوة دون تكرار ودون فجوات معرفية."
+                        : "Directed Acyclic Graph (DAG) visualizing concept scaffolding, prerequisite prerequisites, and cumulative learning."}
+                    </p>
+                  </div>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <span style={{ background: "#ecfdf5", border: "1px solid #a7f3d0", color: "#065f46", fontSize: 12, fontWeight: 700, padding: "5px 12px", borderRadius: 8 }}>
+                      ✓ {isAr ? "تسلسل بيداغوجي موثق" : "Acyclic Scaffolding"}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Concept Stats */}
+                {(() => {
+                  const graph = course.conceptGraph || (course.outline ? buildConceptGraph(course.outline as any) : { nodes: [], edges: [] });
+                  const prereqEdges = graph.edges.filter((e) => e.type === "prereq").length;
+                  const reinfEdges = graph.edges.filter((e) => e.type === "reinforces").length;
+
+                  return (
+                    <div>
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 12, marginBottom: 24 }}>
+                        <div style={{ background: "#f8fafc", border: "1px solid var(--line)", borderRadius: 12, padding: "14px 16px" }}>
+                          <div style={{ fontSize: 11, fontWeight: 700, color: "var(--muted)", textTransform: "uppercase" }}>
+                            {isAr ? "إجمالي المفاهيم" : "Total Concepts"}
+                          </div>
+                          <div style={{ fontSize: 24, fontWeight: 800, color: "var(--ink)", marginTop: 4 }}>
+                            {graph.nodes.length || outline.modules.reduce((acc, m) => acc + (m.lessonItems?.reduce((a, li) => a + (li.introduces?.length || 0), 0) || 0), 0)}
+                          </div>
+                        </div>
+
+                        <div style={{ background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 12, padding: "14px 16px" }}>
+                          <div style={{ fontSize: 11, fontWeight: 700, color: "#92400e", textTransform: "uppercase" }}>
+                            🔑 {isAr ? "روابط المتطلبات" : "Prerequisite Links"}
+                          </div>
+                          <div style={{ fontSize: 24, fontWeight: 800, color: "#b45309", marginTop: 4 }}>
+                            {prereqEdges}
+                          </div>
+                        </div>
+
+                        <div style={{ background: "#eef2ff", border: "1px solid #c7d2fe", borderRadius: 12, padding: "14px 16px" }}>
+                          <div style={{ fontSize: 11, fontWeight: 700, color: "#3730a3", textTransform: "uppercase" }}>
+                            🔄 {isAr ? "روابط الترسيخ" : "Reinforcement Links"}
+                          </div>
+                          <div style={{ fontSize: 24, fontWeight: 800, color: "#4338ca", marginTop: 4 }}>
+                            {reinfEdges}
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Chronological Concept Flow by Module and Lesson */}
+                      <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+                        {outline.modules.map((m, mI) => (
+                          <div
+                            key={mI}
+                            style={{
+                              background: "#ffffff",
+                              border: "1.5px solid var(--line)",
+                              borderRadius: 14,
+                              padding: "18px 20px",
+                            }}
+                          >
+                            <div style={{ fontSize: 13, fontWeight: 800, color: "var(--alpha)", marginBottom: 12 }}>
+                              {isAr ? "الوحدة" : "Module"} {mI + 1}: {m.title}
+                            </div>
+
+                            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 12 }}>
+                              {m.lessons.map((lTitle, lI) => {
+                                const idKey = `${mI}:${lI}`;
+                                const isDone = progress.done.includes(idKey);
+                                const isCur = mI === modIdx && lI === lesIdx;
+                                const dep = m.lessonItems?.[lI] ||
+                                  (course.outline?.conceptDependencies ? course.outline.conceptDependencies[lTitle] : undefined);
+
+                                return (
+                                  <div
+                                    key={lI}
+                                    onClick={() => {
+                                      setModIdx(mI);
+                                      setLesIdx(lI);
+                                      setTab("lesson");
+                                    }}
+                                    style={{
+                                      border: isCur ? "2px solid var(--alpha)" : "1.5px solid var(--line)",
+                                      background: isCur ? "#faf8ff" : isDone ? "#f0fdf4" : "#ffffff",
+                                      borderRadius: 12,
+                                      padding: 14,
+                                      cursor: "pointer",
+                                      transition: "all .15s",
+                                    }}
+                                  >
+                                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                                      <span style={{ fontWeight: 700, fontSize: 14, color: isCur ? "var(--alpha)" : "var(--ink)" }}>
+                                        {lI + 1}. {lTitle}
+                                      </span>
+                                      {isDone && (
+                                        <span style={{ color: "#166534", fontSize: 12, fontWeight: 700 }}>✓</span>
+                                      )}
+                                    </div>
+
+                                    {/* Introduces */}
+                                    {dep?.introduces && dep.introduces.length > 0 && (
+                                      <div style={{ marginTop: 6 }}>
+                                        <div style={{ fontSize: 10, fontWeight: 700, color: "#065f46", marginBottom: 3 }}>
+                                          🚀 {isAr ? "يقدّم لأول مرة:" : "Introduces:"}
+                                        </div>
+                                        <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                                          {dep.introduces.map((intro, idx) => (
+                                            <span
+                                              key={idx}
+                                              style={{
+                                                fontSize: 11,
+                                                padding: "2px 7px",
+                                                borderRadius: 6,
+                                                background: "#ecfdf5",
+                                                color: "#065f46",
+                                                fontWeight: 700,
+                                                border: "1px solid #a7f3d0",
+                                              }}
+                                            >
+                                              {intro}
+                                            </span>
+                                          ))}
+                                        </div>
+                                      </div>
+                                    )}
+
+                                    {/* Prerequisites */}
+                                    {dep?.prerequisites && dep.prerequisites.length > 0 && (
+                                      <div style={{ marginTop: 8 }}>
+                                        <div style={{ fontSize: 10, fontWeight: 700, color: "#92400e", marginBottom: 3 }}>
+                                          🔑 {isAr ? "يبني على متطلبات:" : "Requires:"}
+                                        </div>
+                                        <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                                          {dep.prerequisites.map((p, idx) => (
+                                            <span
+                                              key={idx}
+                                              style={{
+                                                fontSize: 11,
+                                                padding: "2px 7px",
+                                                borderRadius: 6,
+                                                background: "#fef3c7",
+                                                color: "#92400e",
+                                                fontWeight: 600,
+                                                border: "1px solid #fde68a",
+                                              }}
+                                            >
+                                              {p}
+                                            </span>
+                                          ))}
+                                        </div>
+                                      </div>
+                                    )}
+
+                                    {/* Reinforces */}
+                                    {dep?.reinforces && dep.reinforces.length > 0 && (
+                                      <div style={{ marginTop: 8 }}>
+                                        <div style={{ fontSize: 10, fontWeight: 700, color: "#3730a3", marginBottom: 3 }}>
+                                          🔄 {isAr ? "يعيد ترسيخ وتطبيق:" : "Reinforces:"}
+                                        </div>
+                                        <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                                          {dep.reinforces.map((r, idx) => (
+                                            <span
+                                              key={idx}
+                                              style={{
+                                                fontSize: 11,
+                                                padding: "2px 7px",
+                                                borderRadius: 6,
+                                                background: "#e0e7ff",
+                                                color: "#3730a3",
+                                                fontWeight: 600,
+                                                border: "1px solid #c7d2fe",
+                                              }}
+                                            >
+                                              {r}
+                                            </span>
+                                          ))}
+                                        </div>
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })()}
               </div>
             )}
 

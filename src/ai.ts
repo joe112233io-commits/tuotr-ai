@@ -16,6 +16,7 @@ import {
   Card,
   HarnessError,
   cleanJson,
+  buildConceptGraph,
 } from "./harness";
 
 export interface PresetProvider {
@@ -410,6 +411,32 @@ export const CourseAI = {
       );
     }
 
+    // Look up concept dependencies for this lesson from outline
+    let lessonPrereqs: string[] = [];
+    let lessonIntroduces: string[] = [];
+    let lessonReinforces: string[] = [];
+
+    if (ctx?.outline) {
+      if (ctx.outline.conceptDependencies?.[lessonTitle]) {
+        const dep = ctx.outline.conceptDependencies[lessonTitle];
+        lessonPrereqs = dep.prerequisites || [];
+        lessonIntroduces = dep.introduces || [];
+        lessonReinforces = dep.reinforces || [];
+      } else if (Array.isArray(ctx.outline.modules)) {
+        for (const m of ctx.outline.modules) {
+          if (m.lessonItems) {
+            const found = m.lessonItems.find((li) => li.title === lessonTitle);
+            if (found) {
+              lessonPrereqs = found.prerequisites || [];
+              lessonIntroduces = found.introduces || [];
+              lessonReinforces = found.reinforces || [];
+              break;
+            }
+          }
+        }
+      }
+    }
+
     const doc = await writeLesson(
       {
         courseTitle,
@@ -422,6 +449,9 @@ export const CourseAI = {
         difficulty: ctx?.difficulty || ctx?.settings?.difficulty || "beginner",
         settings: ctx?.settings || {},
         brain,
+        introduces: lessonIntroduces,
+        prerequisites: lessonPrereqs,
+        reinforces: lessonReinforces,
       },
       lang
     );
