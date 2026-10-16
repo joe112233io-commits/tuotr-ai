@@ -1,3 +1,5 @@
+import { LessonDoc, Term } from "./harness";
+
 export interface User {
   email: string;
   name: string;
@@ -29,6 +31,8 @@ export interface Course {
   settings: any;
   outline: CourseOutline | null;
   lessons: Record<string, string>;
+  lessonDocs?: Record<string, LessonDoc>;
+  glossary?: Term[];
   lang: string;
 }
 

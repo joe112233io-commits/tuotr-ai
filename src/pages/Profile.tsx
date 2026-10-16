@@ -15,6 +15,7 @@ export const Profile: React.FC<ProfileProps> = ({ currentLang, navigate, onOpenS
   const [loading, setLoading] = useState(true);
 
   const t = (k: string) => (STR as any)[currentLang][k] || (STR.en as any)[k] || k;
+  const isAr = currentLang === "ar";
   const plan = Store.plan();
   const pricing = getPricingData(currentLang);
   const maxCourses = pricing[plan]?.maxCourses || 6;

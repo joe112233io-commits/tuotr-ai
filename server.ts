@@ -7,23 +7,78 @@ import { GoogleGenAI } from "@google/genai";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// Strict Allowlist and SSRF Guard
+function validateCustomUrl(rawUrl: string): { ok: boolean; reason?: string } {
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.protocol !== "https:") {
+      return { ok: false, reason: "Insecure protocol. Only https:// endpoints are permitted." };
+    }
+
+    const host = parsed.hostname.toLowerCase();
+
+    // Block private, link-local, loopback, and metadata ranges
+    if (
+      host === "localhost" ||
+      host.endsWith(".localhost") ||
+      host === "127.0.0.1" ||
+      host.startsWith("127.") ||
+      host.startsWith("10.") ||
+      host.startsWith("192.168.") ||
+      host.startsWith("169.254.") ||
+      /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(host) ||
+      host.endsWith(".internal") ||
+      host.endsWith(".local")
+    ) {
+      return { ok: false, reason: `Access to private or local network host (${host}) is strictly prohibited.` };
+    }
+
+    // Whitelist approved AI endpoints
+    const ALLOWED_DOMAINS = [
+      "openrouter.ai",
+      "api.opencode.ai",
+      "api.groq.com",
+      "api.deepseek.com",
+      "generativelanguage.googleapis.com",
+      "api.openai.com",
+      "api.anthropic.com",
+      "api.together.xyz",
+      "api.mistral.ai",
+    ];
+
+    const isWhitelisted = ALLOWED_DOMAINS.some(
+      (d) => host === d || host.endsWith(`.${d}`)
+    );
+
+    if (!isWhitelisted) {
+      return { ok: false, reason: `Target host "${host}" is not on the verified provider allowlist.` };
+    }
+
+    return { ok: true };
+  } catch (e: any) {
+    return { ok: false, reason: "Malformed URL format." };
+  }
+}
+
 async function startServer() {
   const app = express();
   app.use(express.json({ limit: "10mb" }));
 
   // Initialize Gemini client according to gemini-api skill standards
   let aiClient: GoogleGenAI | null = null;
-  try {
-    aiClient = new GoogleGenAI({
-      apiKey: process.env.GEMINI_API_KEY,
-      httpOptions: {
-        headers: {
-          "User-Agent": "aistudio-build",
+  if (process.env.GEMINI_API_KEY) {
+    try {
+      aiClient = new GoogleGenAI({
+        apiKey: process.env.GEMINI_API_KEY,
+        httpOptions: {
+          headers: {
+            "User-Agent": "aistudio-build",
+          },
         },
-      },
-    });
-  } catch (e) {
-    console.log("[Server] Gemini client initialized in fallback mode");
+      });
+    } catch (e: any) {
+      console.warn("[Server] Gemini client initialization error:", e.message);
+    }
   }
 
   // Healthcheck endpoint
@@ -31,141 +86,149 @@ async function startServer() {
     res.json({ status: "ok", timestamp: Date.now() });
   });
 
-  // Free built-in fallback AI caller
-  async function callFreeFallback(instruction: string, stopSequences?: string[]): Promise<string> {
-    const resp = await fetch("https://text.pollinations.ai/openai/chat/completions", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: "openai",
-        messages: [{ role: "user", content: instruction }],
-        stop: stopSequences || undefined,
-      }),
-    });
-    const data: any = await resp.json();
-    return data?.choices?.[0]?.message?.content || "";
-  }
-
-  // AI Generation proxy endpoint
+  // AI Generation proxy endpoint with strict error propagation & SSRF guards
   app.post("/api/ai/generate", async (req, res) => {
-    const { instruction, model, customApiKey, customBaseUrl, providerType, stopSequences } = req.body;
+    const {
+      instruction,
+      model,
+      customApiKey,
+      customBaseUrl,
+      providerType,
+      stopSequences,
+      temperature,
+    } = req.body;
 
-    if (!instruction) {
-      res.status(400).json({ error: "Instruction is required" });
+    if (!instruction || typeof instruction !== "string") {
+      res.status(400).json({ error: "Instruction string is required" });
       return;
     }
 
-    // 1. If custom provider base URL is provided (OpenRouter, OpenCode, Pollinations, Groq, OpenAI, Ollama, etc.)
+    const tempVal = typeof temperature === "number" ? Math.max(0, Math.min(2, temperature)) : 0.2;
+
+    // 1. If custom provider base URL is specified by user
     if (customBaseUrl) {
+      const urlCheck = validateCustomUrl(String(customBaseUrl).trim());
+      if (!urlCheck.ok) {
+        res.status(403).json({ error: `SSRF Policy Violation: ${urlCheck.reason}` });
+        return;
+      }
+
       try {
-        const cleanBase = String(customBaseUrl || "").trim().replace(/\/+$/, "");
+        const cleanBase = String(customBaseUrl).trim().replace(/\/+$/, "");
+
         if (providerType === "anthropic") {
           const headers: Record<string, string> = {
             "Content-Type": "application/json",
             "anthropic-version": "2023-06-01",
             "anthropic-dangerous-direct-browser-access": "true",
           };
-          if (customApiKey) {
-            headers["x-api-key"] = customApiKey;
-          }
+          if (customApiKey) headers["x-api-key"] = customApiKey;
+
           const resp = await fetch(`${cleanBase}/messages`, {
             method: "POST",
             headers,
             body: JSON.stringify({
               model: model || "claude-3-5-sonnet-20241022",
               max_tokens: 4000,
+              temperature: tempVal,
               messages: [{ role: "user", content: instruction }],
               stop_sequences: stopSequences || undefined,
             }),
           });
+
           const data: any = await resp.json();
-          if (!resp.ok) throw new Error(data.error?.message || `HTTP ${resp.status}`);
+          if (!resp.ok) {
+            res.status(resp.status || 502).json({ error: data.error?.message || `Anthropic HTTP ${resp.status}` });
+            return;
+          }
           const text = data?.content?.[0]?.text || "";
           res.json({ text });
           return;
         } else {
-          // OpenAI compatible (OpenRouter, OpenCode, Pollinations, Groq, DeepSeek, Gemini-OpenAI, Ollama)
+          // OpenAI compatible (OpenRouter, OpenCode, Groq, DeepSeek, OpenAI)
           const headers: Record<string, string> = {
             "Content-Type": "application/json",
             "HTTP-Referer": "https://tutorai.me",
             "X-Title": "TutorAI",
           };
-          if (customApiKey) {
-            headers["Authorization"] = `Bearer ${customApiKey}`;
-          }
+          if (customApiKey) headers["Authorization"] = `Bearer ${customApiKey}`;
+
           const resp = await fetch(`${cleanBase}/chat/completions`, {
             method: "POST",
             headers,
             body: JSON.stringify({
               model: model || "gpt-4o-mini",
+              temperature: tempVal,
               messages: [{ role: "user", content: instruction }],
               stop: stopSequences || undefined,
             }),
           });
+
           const data: any = await resp.json();
-          if (!resp.ok) throw new Error(data.error?.message || data.message || `HTTP ${resp.status}`);
+          if (!resp.ok) {
+            res.status(resp.status || 502).json({ error: data.error?.message || data.message || `Provider HTTP ${resp.status}` });
+            return;
+          }
           const text = data?.choices?.[0]?.message?.content || "";
           res.json({ text });
           return;
         }
       } catch (err: any) {
-        console.warn("[Server] Custom provider error, attempting free fallback:", err.message);
-        try {
-          const text = await callFreeFallback(instruction, stopSequences);
-          if (text) {
-            res.json({ text });
-            return;
-          }
-        } catch (fallbackErr) {
-          // pass through to final error
-        }
-        res.status(500).json({ error: err.message });
+        console.error("[Server] Custom provider error:", err.message);
+        res.status(502).json({ error: `Provider request failed: ${err.message}` });
         return;
       }
     }
 
-    // 2. Default Server-side generation: Try Gemini API first
+    // 2. Server-side Gemini generation
     if (process.env.GEMINI_API_KEY) {
       try {
         if (!aiClient) {
           aiClient = new GoogleGenAI({
             apiKey: process.env.GEMINI_API_KEY,
             httpOptions: {
-              headers: {
-                "User-Agent": "aistudio-build",
-              },
+              headers: { "User-Agent": "aistudio-build" },
             },
           });
         }
 
-        const response = await aiClient.models.generateContent({
-          model: "gemini-3.8-flash",
-          contents: instruction,
-        });
+        // Try standard Gemini models in order of stability
+        const candidateModels = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-3.8-flash"];
+        let lastGeminiErr = "";
 
-        const text = response.text || "";
-        if (text) {
-          res.json({ text });
-          return;
+        for (const candidate of candidateModels) {
+          try {
+            const response = await aiClient.models.generateContent({
+              model: candidate,
+              contents: instruction,
+              config: {
+                temperature: tempVal,
+              },
+            });
+            const text = response.text || "";
+            if (text) {
+              res.json({ text });
+              return;
+            }
+          } catch (mErr: any) {
+            lastGeminiErr = mErr.message || String(mErr);
+            // If model not found or rate limit, try next candidate
+          }
         }
-      } catch (geminiErr: any) {
-        // Log clean notice and smoothly switch to free resilient fallback
-        console.log("[Server] Gemini temporarily unavailable, switching to built-in high-availability engine");
-      }
-    }
 
-    // 3. Resilient Free Engine Fallback: Guarantees 100% course generation uptime
-    try {
-      const text = await callFreeFallback(instruction, stopSequences);
-      if (text) {
-        res.json({ text });
+        res.status(502).json({ error: `Gemini generation failed: ${lastGeminiErr}` });
+        return;
+      } catch (geminiErr: any) {
+        console.error("[Server] Gemini error:", geminiErr.message);
+        res.status(502).json({ error: `Gemini service error: ${geminiErr.message}` });
         return;
       }
-    } catch (fallbackErr: any) {
-      console.warn("[Server] Fallback engine error:", fallbackErr?.message || fallbackErr);
     }
 
-    res.json({ text: "" });
+    // 3. No provider available
+    res.status(500).json({
+      error: "No AI provider configured. Please provide a valid API key or configure an active provider in Settings.",
+    });
   });
 
   // Vite middleware in development

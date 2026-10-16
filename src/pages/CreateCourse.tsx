@@ -1,8 +1,10 @@
 import React, { useState, useEffect } from "react";
+import DOMPurify from "dompurify";
 import { Store } from "../store";
 import { STR, LISTS, getPricingData, planName } from "../i18n";
 import { CourseAI } from "../ai";
 import { ModuleData } from "../types";
+import { esc } from "../harness";
 
 interface CreateCourseProps {
   currentLang: string;
@@ -66,8 +68,9 @@ export const CreateCourse: React.FC<CreateCourseProps> = ({ currentLang, navigat
       };
       reader.readAsText(f);
     } else {
-      setFileInfo({ name: f.name, size: f.size, content: "" });
-      onToast(isAr ? `تم تحديد الملف: ${f.name}` : `File selected: ${f.name}`, "ok");
+      setFileInfo(null);
+      e.target.value = "";
+      onToast(isAr ? "يرجى اختيار ملف نصي بتنسيق .txt أو .md لقراءة المحتوى واستخدامه كمرجع للدورة." : "Please select a .txt or .md text file to extract content for the course.", "err");
     }
   };
 
@@ -135,14 +138,24 @@ export const CreateCourse: React.FC<CreateCourseProps> = ({ currentLang, navigat
     }
     setHwLoading(true);
     setHwOut("");
-    let html = "";
     try {
-      await CourseAI.homework(q, currentLang, (chunk) => {
-        html += chunk;
-        setHwOut(html);
-      });
-    } catch (e) {
-      setHwOut(t("wentWrong"));
+      const res = await CourseAI.homework(q, currentLang);
+      let output = "";
+      if (res.solved) {
+        output = `<h4 style="margin: 0 0 8px; font-weight: 700;">${isAr ? "خطوات الحل التفصيلية:" : "Step-by-Step Derivation:"}</h4><ol style="margin: 0; padding-inline-start: 20px; line-height: 1.7;">`;
+        res.steps.forEach((s) => {
+          output += `<li style="margin-bottom: 6px;">${esc(s)}</li>`;
+        });
+        output += `</ol><div style="padding:10px 14px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;margin-top:12px;color:#166534;"><strong>${isAr ? "النتيجة النهائية:" : "Final Result:"}</strong> ${esc(res.finalAnswer)}</div>`;
+        if (res.check) {
+          output += `<div style="margin-top:8px;font-size:12px;color:#15803d;"><em>✓ ${isAr ? "طريقة التحقق الرياضي:" : "Verification Check:"} ${esc(res.check)}</em></div>`;
+        }
+      } else {
+        output = `<div style="padding:12px 16px;background:#fef2f2;border:1px solid #fecaca;border-radius:8px;color:#991b1b;"><strong style="display:block;margin-bottom:4px;">⚠️ ${isAr ? "تعذر حل المسألة (معطيات غير كافية):" : "Cannot Solve (Incomplete Data):"}</strong> ${esc(res.finalAnswer)}</div>`;
+      }
+      setHwOut(output);
+    } catch (e: any) {
+      setHwOut(`<div style="color:#dc2626;padding:10px;">${esc(e.message || t("wentWrong"))}</div>`);
     } finally {
       setHwLoading(false);
     }
@@ -473,7 +486,12 @@ export const CreateCourse: React.FC<CreateCourseProps> = ({ currentLang, navigat
                     whiteSpace: "pre-wrap",
                     fontSize: 14,
                   }}
-                  dangerouslySetInnerHTML={{ __html: hwOut }}
+                  dangerouslySetInnerHTML={{
+                    __html: DOMPurify.sanitize(hwOut, {
+                      ALLOWED_TAGS: ["h4", "ol", "li", "div", "strong", "em", "p", "span"],
+                      ALLOWED_ATTR: ["style"],
+                    }),
+                  }}
                 />
               )}
             </div>

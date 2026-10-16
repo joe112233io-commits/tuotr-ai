@@ -1,8 +1,10 @@
 import React, { useState, useEffect } from "react";
+import DOMPurify from "dompurify";
 import { Store } from "../store";
 import { STR, planName } from "../i18n";
-import { CourseAI, AIProvider } from "../ai";
+import { CourseAI } from "../ai";
 import { Course } from "../types";
+import { LessonDoc, HarnessError } from "../harness";
 
 interface CourseDetailProps {
   slug: string;
@@ -21,64 +23,66 @@ export const CourseDetail: React.FC<CourseDetailProps> = ({ slug, currentLang, n
   const [progress, setProgress] = useState<{ done: string[]; quiz: any }>({ done: [], quiz: {} });
   const [lessonHtml, setLessonHtml] = useState("");
   const [lessonLoading, setLessonLoading] = useState(false);
+  const [lessonError, setLessonError] = useState<string | null>(null);
   const [quizData, setQuizData] = useState<any[] | null>(null);
-  const [quizScore, setQuizScore] = useState<string | null>(null);
+  const [quizError, setQuizError] = useState<string | null>(null);
   const [quizAnswers, setQuizAnswers] = useState<Record<number, number>>({});
   const [quizRevealed, setQuizRevealed] = useState<Record<number, boolean>>({});
   const [flashCards, setFlashCards] = useState<any[] | null>(null);
+  const [flashError, setFlashError] = useState<string | null>(null);
   const [flippedCards, setFlippedCards] = useState<Record<number, boolean>>({});
   const [chatHistory, setChatHistory] = useState<any[]>([]);
   const [chatInput, setChatInput] = useState("");
   const [chatStreaming, setChatStreaming] = useState(false);
   const [speaking, setSpeaking] = useState(false);
+  const [outlineError, setOutlineError] = useState<string | null>(null);
 
   const t = (k: string) => (STR as any)[currentLang][k] || (STR.en as any)[k] || k;
   const isAr = currentLang === "ar";
   const plan = Store.plan();
 
-  useEffect(() => {
-    let mounted = true;
-    async function load() {
-      setLoading(true);
-      const c = await Store.getCourse(slug);
-      if (!c) {
-        if (mounted) setCourse(null);
+  const loadCourseData = async () => {
+    setLoading(true);
+    setOutlineError(null);
+    const c = await Store.getCourse(slug);
+    if (!c) {
+      setCourse(null);
+      setLoading(false);
+      return;
+    }
+    if (c.lang && c.lang !== currentLang) {
+      setLang(c.lang);
+    }
+    if (Store.isLoggedIn()) {
+      const p = await Store.getProgress(slug);
+      setProgress(p);
+    }
+
+    if (!c.outline) {
+      try {
+        const personal = c.personal ? await Store.getPersonalization() : null;
+        const outline = await CourseAI.generateOutline(c.topic, personal, c.settings, c.lang || currentLang);
+        c.outline = outline;
+        c.title = outline.title || c.topic;
+        await Store.saveCourse(c);
+      } catch (e: any) {
+        console.error("[CourseDetail] Outline generation failed:", e);
+        const errDetail = e instanceof HarnessError ? e.message : (e.message || t("outlineFail"));
+        setOutlineError(errDetail);
+        onToast(errDetail, "err");
+        setCourse(c);
         setLoading(false);
         return;
       }
-      if (c.lang && c.lang !== currentLang) {
-        setLang(c.lang);
-      }
-      if (Store.isLoggedIn()) {
-        const p = await Store.getProgress(slug);
-        if (mounted) setProgress(p);
-      }
-      if (!c.outline) {
-        try {
-          const personal = c.personal ? await Store.getPersonalization() : null;
-          const outline = await CourseAI.generateOutline(c.topic, personal, c.settings, c.lang || currentLang);
-          c.outline = outline;
-          c.title = outline.title || c.topic;
-          await Store.saveCourse(c);
-        } catch (e) {
-          onToast(t("outlineFail"), "err");
-          c.outline = {
-            title: c.topic,
-            summary: "",
-            outcomes: [],
-            modules: [{ title: "Module 1", lessons: ["Lesson 1"] }],
-          };
-          await Store.saveCourse(c);
-        }
-      }
-      if (mounted) {
-        setCourse(c);
-        setLoading(false);
-      }
     }
-    load();
+
+    setCourse(c);
+    setLoading(false);
+  };
+
+  useEffect(() => {
+    loadCourseData();
     return () => {
-      mounted = false;
       if (typeof window !== "undefined" && window.speechSynthesis) {
         window.speechSynthesis.cancel();
       }
@@ -101,73 +105,120 @@ export const CourseDetail: React.FC<CourseDetailProps> = ({ slug, currentLang, n
   }, [modIdx, lesIdx, tab, course]);
 
   const loadLessonContent = async () => {
-    if (!course) return;
-    const cached = course.lessons[lessonIdKey];
-    if (cached && !/&lt;(h3|p|ul|pre|table)[\s>]/.test(cached)) {
-      setLessonHtml(cached);
+    if (!course || !course.outline || !curLessonTitle || !curModule) return;
+    setLessonError(null);
+
+    const cachedHtml = course.lessons?.[lessonIdKey];
+    if (cachedHtml && cachedHtml.trim().length > 60) {
+      setLessonHtml(cachedHtml);
       return;
     }
+
     setLessonLoading(true);
     setLessonHtml("");
-    let raw = "";
+    let streamingHtml = "";
+
     try {
       const personal = course.personal ? await Store.getPersonalization() : null;
-      await CourseAI.generateLessonStream(
+      const totalLessons = course.outline.modules.reduce((acc, m) => acc + m.lessons.length, 0);
+
+      const result = await CourseAI.generateLessonStream(
         course.title || course.topic,
         course.topic,
-        curModule!.title,
+        curModule.title,
         curLessonTitle,
         personal,
         course.lang || currentLang,
         (chunk) => {
-          raw += chunk;
-          setLessonHtml(raw);
+          streamingHtml += chunk;
+          setLessonHtml(streamingHtml);
+        },
+        {
+          slug,
+          lessonIndex: lesIdx,
+          totalLessons,
+          outline: course.outline,
+          settings: course.settings,
+          difficulty: course.settings?.difficulty || "beginner",
         }
       );
-      const text = raw.trim() ? raw : "";
-      let rendered = `<div style='white-space:pre-wrap'>${text}</div>`;
-      if (/<[a-z][\s>/]/i.test(text)) {
-        const doc = new DOMParser().parseFromString(text, "text/html");
-        doc.querySelectorAll("table").forEach((tbl) => {
-          const wrap = doc.createElement("div");
-          wrap.className = "tbl-wrap";
-          tbl.replaceWith(wrap);
-          wrap.appendChild(tbl);
-        });
-        rendered = doc.body.innerHTML.trim() ? doc.body.innerHTML : rendered;
-      }
-      course.lessons[lessonIdKey] = rendered;
+
+      // Save verified data and rendered HTML
+      if (!course.lessonDocs) course.lessonDocs = {};
+      course.lessonDocs[lessonIdKey] = result.doc;
+      if (!course.lessons) course.lessons = {};
+      course.lessons[lessonIdKey] = result.html;
       await Store.saveCourse(course);
-      setLessonHtml(rendered);
-    } catch (e) {
-      setLessonHtml(t("lessonFail"));
+      setLessonHtml(result.html);
+    } catch (e: any) {
+      console.error("[CourseDetail] Lesson generation failed:", e);
+      const msg = e instanceof HarnessError ? e.message : (e.message || t("lessonFail"));
+      setLessonError(msg);
+      setLessonHtml("");
     } finally {
       setLessonLoading(false);
     }
   };
 
   const loadQuiz = async () => {
-    if (!course) return;
+    if (!course || !curLessonTitle || !curModule) return;
+    setQuizError(null);
     setQuizData(null);
-    setQuizScore(null);
     setQuizAnswers({});
     setQuizRevealed({});
+
+    const curDoc = course.lessonDocs?.[lessonIdKey] || null;
+    if (!curDoc) {
+      setQuizError(
+        isAr
+          ? "يجب توليد محتوى الدرس أولاً لإنشاء اختبار حقيقي مستند إلى نصوص الدرس المعتمدة."
+          : "Lesson content must be generated first to build an authentic quiz grounded in verified lesson text."
+      );
+      return;
+    }
+
     try {
-      const qs = await CourseAI.generateQuiz(course.title || course.topic, curModule!.title, curLessonTitle, course.lang || currentLang);
+      const qs = await CourseAI.generateQuiz(
+        curDoc,
+        course.title || course.topic,
+        curModule.title,
+        curLessonTitle,
+        course.lang || currentLang
+      );
       setQuizData(qs);
-    } catch (e) {
+    } catch (e: any) {
+      setQuizError(e.message || t("quizFail"));
       setQuizData([]);
     }
   };
 
   const loadFlashcards = async () => {
     if (!course) return;
+    setFlashError(null);
     setFlashCards(null);
     setFlippedCards({});
+
+    const curDoc = course.lessonDocs?.[lessonIdKey] || null;
+    if (!curDoc) {
+      setFlashError(
+        isAr
+          ? "يجب توليد محتوى الدرس أولاً لاشتقاق البطاقات التعليمية."
+          : "Lesson content must be generated first to derive flashcards."
+      );
+      return;
+    }
+
     try {
-      const cards = await CourseAI.generateFlashcards(course.title || course.topic, course.topic, course.lang || currentLang);
+      const cards = await CourseAI.generateFlashcards(
+        curDoc,
+        course.glossary || null,
+        course.title || course.topic,
+        course.topic,
+        course.lang || currentLang
+      );
       setFlashCards(cards);
-    } catch (e) {
+    } catch (e: any) {
+      setFlashError(e.message || "Failed to generate flashcards");
       setFlashCards([]);
     }
   };
@@ -216,6 +267,8 @@ export const CourseDetail: React.FC<CourseDetailProps> = ({ slug, currentLang, n
     setChatStreaming(true);
     let tutorReply = "";
     try {
+      const curDoc = course.lessonDocs?.[lessonIdKey];
+      const lessonText = curDoc ? `${curDoc.goal}\n${curDoc.takeaway}` : "";
       await CourseAI.chat(
         course.title || course.topic,
         course.topic,
@@ -223,13 +276,14 @@ export const CourseDetail: React.FC<CourseDetailProps> = ({ slug, currentLang, n
         newHist.slice(0, -1),
         q,
         course.lang || currentLang,
+        lessonText,
         (chunk) => {
           tutorReply += chunk;
           setChatHistory([...newHist, { role: "tutor", text: tutorReply }]);
         }
       );
-    } catch (e) {
-      tutorReply = t("wentWrong");
+    } catch (e: any) {
+      tutorReply = e.message || t("wentWrong");
       setChatHistory([...newHist, { role: "tutor", text: tutorReply }]);
     } finally {
       setChatStreaming(false);
@@ -247,9 +301,14 @@ export const CourseDetail: React.FC<CourseDetailProps> = ({ slug, currentLang, n
       return;
     }
 
-    const tmpDiv = document.createElement("div");
-    tmpDiv.innerHTML = lessonHtml;
-    const textContent = tmpDiv.textContent || tmpDiv.innerText || "";
+    const curDoc = course?.lessonDocs?.[lessonIdKey];
+    let textContent = "";
+    if (curDoc) {
+      textContent = `${curDoc.goal}. ${curDoc.blocks.map((b) => (b as any).t || ((b as any).items ? (b as any).items.join(". ") : "")).join(" ")}. ${curDoc.takeaway}`;
+    } else {
+      textContent = lessonHtml.replace(/<[^>]*>/g, " ");
+    }
+
     if (!textContent.trim()) return;
 
     const utterance = new SpeechSynthesisUtterance(textContent.slice(0, 3000));
@@ -317,14 +376,13 @@ export const CourseDetail: React.FC<CourseDetailProps> = ({ slug, currentLang, n
     );
 
     const renderBranch = (branchMods: typeof mods, dir: number) => {
-      let curY = cy - (branchMods.reduce((acc, m) => acc + 48 + m.lessons.length * 40 + 20, 0) / 2) + pad;
+      let curY = cy - branchMods.reduce((acc, m) => acc + 48 + m.lessons.length * 40 + 20, 0) / 2 + pad;
 
       branchMods.forEach((m) => {
         const mx = dir > 0 ? cx + rootW / 2 + gapX : cx - rootW / 2 - gapX - modW;
         const my = curY;
         const color = MODC[m.i % MODC.length];
 
-        // Connector curve root -> module
         const rEdgeX = dir > 0 ? cx + rootW / 2 : cx - rootW / 2;
         const mEdgeX = dir > 0 ? mx : mx + modW;
         elements.push(
@@ -337,7 +395,6 @@ export const CourseDetail: React.FC<CourseDetailProps> = ({ slug, currentLang, n
           />
         );
 
-        // Module Node
         elements.push(
           <g
             key={`mod-node-${m.i}`}
@@ -376,7 +433,6 @@ export const CourseDetail: React.FC<CourseDetailProps> = ({ slug, currentLang, n
           const ly = lesY;
           const isDone = progress.done.includes(`${m.i}:${j}`);
 
-          // Connector module -> lesson
           const mConnX = dir > 0 ? mx + modW : mx;
           const lConnX = dir > 0 ? lx : lx + lesW;
           elements.push(
@@ -389,7 +445,6 @@ export const CourseDetail: React.FC<CourseDetailProps> = ({ slug, currentLang, n
             />
           );
 
-          // Lesson Node
           elements.push(
             <g
               key={`les-node-${m.i}-${j}`}
@@ -452,6 +507,30 @@ export const CourseDetail: React.FC<CourseDetailProps> = ({ slug, currentLang, n
     );
   }
 
+  if (outlineError) {
+    return (
+      <div className="main-container" style={{ paddingTop: 60 }}>
+        <div className="panel" style={{ maxWidth: 640, margin: "0 auto", padding: 32, textAlign: "center" }}>
+          <div style={{ fontSize: 40, marginBottom: 12 }}>⚠️</div>
+          <h2 style={{ color: "#dc2626", margin: "0 0 12px" }}>
+            {isAr ? "فشل بناء مخطط الدورة التعليمية" : "Course Outline Generation Failed"}
+          </h2>
+          <p style={{ color: "var(--muted)", lineHeight: 1.6, marginBottom: 24, fontSize: 14 }}>
+            {outlineError}
+          </p>
+          <div style={{ display: "flex", justifyContent: "center", gap: 12 }}>
+            <button className="btn btn-primary" onClick={loadCourseData}>
+              🔄 {isAr ? "إعادة المحاولة الآن" : "Retry Generation"}
+            </button>
+            <button className="btn btn-ghost" onClick={() => navigate("#/create")}>
+              {isAr ? "العودة للإنشاء" : "Back to Create"}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   if (!course || !course.outline) {
     return (
       <div className="main-container" style={{ paddingTop: 60 }}>
@@ -477,6 +556,15 @@ export const CourseDetail: React.FC<CourseDetailProps> = ({ slug, currentLang, n
     ["mind", t("tabMind")],
     ["chat", t("tabChat")],
   ];
+
+  const sanitizedLessonHtml = DOMPurify.sanitize(lessonHtml, {
+    ALLOWED_TAGS: [
+      "div", "span", "p", "h3", "h4", "ul", "ol", "li", "table", "thead",
+      "tbody", "tr", "th", "td", "code", "pre", "details", "summary",
+      "strong", "em", "b", "i", "small"
+    ],
+    ALLOWED_ATTR: ["class", "style"],
+  });
 
   return (
     <div className="main-container" style={{ paddingBottom: 60 }}>
@@ -597,7 +685,38 @@ export const CourseDetail: React.FC<CourseDetailProps> = ({ slug, currentLang, n
                     </p>
                   </div>
                 )}
-                <div dangerouslySetInnerHTML={{ __html: lessonHtml }} />
+
+                {lessonError && (
+                  <div style={{ padding: "20px 24px", background: "#fef2f2", border: "1.5px solid #fecaca", borderRadius: 14, margin: "16px 0" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 10, color: "#991b1b", fontWeight: 800, fontSize: 15 }}>
+                      <span>⚠️</span>
+                      <span>{isAr ? "تعذر توليد الدرس عبر الذكاء الاصطناعي" : "AI Lesson Generation Failed"}</span>
+                    </div>
+                    <p style={{ color: "#7f1d1d", fontSize: 13, margin: "10px 0 16px", lineHeight: 1.6 }}>
+                      {lessonError}
+                    </p>
+                    <button
+                      className="btn btn-primary"
+                      onClick={loadLessonContent}
+                      style={{ padding: "8px 20px", fontSize: 13 }}
+                    >
+                      🔄 {isAr ? "إعادة محاولة التوليد" : "Retry Generation"}
+                    </button>
+                  </div>
+                )}
+
+                {!lessonLoading && !lessonError && (
+                  <div dangerouslySetInnerHTML={{ __html: sanitizedLessonHtml }} />
+                )}
+
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 32, paddingTop: 20, borderTop: "1px solid var(--line)" }}>
+                  <button className="btn btn-ghost" onClick={() => stepLesson(-1)}>
+                    {isAr ? "← الدرس السابق" : "← Previous Lesson"}
+                  </button>
+                  <button className="btn btn-primary" onClick={completeAndNext}>
+                    {isAr ? "إتمام والانتقال للدرس التالي →" : "Complete & Next Lesson →"}
+                  </button>
+                </div>
               </div>
             )}
 
@@ -605,14 +724,23 @@ export const CourseDetail: React.FC<CourseDetailProps> = ({ slug, currentLang, n
             {tab === "quiz" && (
               <div>
                 <h3 style={{ marginTop: 0 }}>{isAr ? "اختبار استيعاب الدرس:" : "Mastery Quiz:"} {curLessonTitle}</h3>
-                {!quizData ? (
+                {quizError && (
+                  <div style={{ padding: "16px 20px", background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 12, marginBottom: 16 }}>
+                    <div style={{ color: "#991b1b", fontWeight: 700, marginBottom: 6 }}>
+                      ⚠️ {isAr ? "تعذر إنشاء الاختبار" : "Quiz Generation Error"}
+                    </div>
+                    <p style={{ margin: "0 0 12px", color: "#7f1d1d", fontSize: 13 }}>{quizError}</p>
+                    <button className="btn btn-primary" style={{ padding: "6px 16px", fontSize: 12 }} onClick={loadQuiz}>
+                      🔄 {isAr ? "إعادة المحاولة" : "Retry"}
+                    </button>
+                  </div>
+                )}
+                {!quizData && !quizError ? (
                   <div style={{ textAlign: "center", padding: "40px 0" }}>
                     <div className="spinner"></div>
                     <p className="pulse">{t("quizPrep")}</p>
                   </div>
-                ) : quizData.length === 0 ? (
-                  <p>{t("quizFail")}</p>
-                ) : (
+                ) : quizData && quizData.length > 0 ? (
                   <div>
                     {quizData.map((q, i) => (
                       <div
@@ -638,6 +766,11 @@ export const CourseDetail: React.FC<CourseDetailProps> = ({ slug, currentLang, n
                         {quizRevealed[i] && (
                           <div className="hint" style={{ display: "block", marginTop: 8, color: quizAnswers[i] === q.answer ? "#166534" : "#991b1b" }}>
                             💡 {q.why}
+                            {q.evidence && (
+                              <div style={{ marginTop: 4, fontSize: 12, opacity: 0.9 }}>
+                                <em>📖 {isAr ? "دليل من الدرس:" : "Evidence from lesson:"} "{q.evidence}"</em>
+                              </div>
+                            )}
                           </div>
                         )}
                       </div>
@@ -649,131 +782,139 @@ export const CourseDetail: React.FC<CourseDetailProps> = ({ slug, currentLang, n
                         const rev: Record<number, boolean> = {};
                         quizData.forEach((_, i) => { rev[i] = true; });
                         setQuizRevealed(rev);
-                        let sc = 0;
-                        quizData.forEach((q, i) => {
-                          if (quizAnswers[i] === q.answer) sc++;
-                        });
-                        setQuizScore(`${t("score")} ${sc} / ${quizData.length}`);
+                        const correct = quizData.filter((q, i) => quizAnswers[i] === q.answer).length;
+                        onToast(`${isAr ? "نتيجتك:" : "Score:"} ${correct} / ${quizData.length}`, correct >= quizData.length / 2 ? "ok" : "err");
                       }}
                     >
                       {t("checkAns")}
                     </button>
-                    {quizScore && <div style={{ marginTop: 12, fontWeight: 800, fontSize: 16 }}>{quizScore}</div>}
                   </div>
-                )}
+                ) : null}
               </div>
             )}
 
             {/* FLASHCARDS TAB */}
             {tab === "flash" && (
               <div>
-                <h3 style={{ marginTop: 0 }}>{t("flashTitle")}</h3>
-                <p style={{ color: "var(--muted)", fontSize: 14 }}>
-                  {isAr ? "انقر على أي بطاقة لعرض الإجابة والشرح وتثبيت المعلومة." : "Click any flashcard to flip between definition and answer."}
-                </p>
-                {!flashCards ? (
+                <h3 style={{ marginTop: 0 }}>{isAr ? "بطاقات الاستذكار السريع:" : "Spaced Repetition Flashcards:"} {curLessonTitle}</h3>
+                {flashError && (
+                  <div style={{ padding: "16px 20px", background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 12, marginBottom: 16 }}>
+                    <div style={{ color: "#991b1b", fontWeight: 700, marginBottom: 6 }}>
+                      ⚠️ {isAr ? "تعذر توليد البطاقات" : "Flashcards Error"}
+                    </div>
+                    <p style={{ margin: "0 0 12px", color: "#7f1d1d", fontSize: 13 }}>{flashError}</p>
+                    <button className="btn btn-primary" style={{ padding: "6px 16px", fontSize: 12 }} onClick={loadFlashcards}>
+                      🔄 {isAr ? "إعادة المحاولة" : "Retry"}
+                    </button>
+                  </div>
+                )}
+                {!flashCards && !flashError ? (
                   <div style={{ textAlign: "center", padding: "40px 0" }}>
                     <div className="spinner"></div>
-                    <p className="pulse">{t("flashMake")}</p>
+                    <p className="pulse">{t("flashPrep")}</p>
                   </div>
-                ) : flashCards.length === 0 ? (
-                  <p>{t("flashFail")}</p>
-                ) : (
+                ) : flashCards && flashCards.length > 0 ? (
                   <div className="flash-grid">
-                    {flashCards.map((f, i) => {
+                    {flashCards.map((c, i) => {
                       const flipped = flippedCards[i];
                       return (
                         <div
                           key={i}
-                          className="flash"
-                          style={{
-                            background: flipped ? "var(--alpha-50)" : "#ffffff",
-                            borderColor: flipped ? "var(--alpha)" : "var(--line)",
-                            boxShadow: "0 4px 14px rgba(0,0,0,.04)",
-                          }}
+                          className="flash-card"
                           onClick={() => setFlippedCards({ ...flippedCards, [i]: !flipped })}
+                          style={{
+                            minHeight: 140,
+                            padding: 20,
+                            border: "1.5px solid var(--line)",
+                            borderRadius: 14,
+                            cursor: "pointer",
+                            background: flipped ? "#f5f3ff" : "#ffffff",
+                            borderColor: flipped ? "var(--alpha)" : "var(--line)",
+                            transition: "all .2s",
+                          }}
                         >
-                          <div style={{ padding: 10 }}>
-                            {flipped ? f.back : f.front}
+                          <div style={{ fontSize: 11, fontWeight: 700, color: "var(--muted)", textTransform: "uppercase", marginBottom: 8 }}>
+                            {flipped ? (isAr ? "💡 الشرح / الإجابة (انقر للقلب)" : "💡 Explanation (Click to flip)") : (isAr ? "❓ المفهوم (انقر للقلب)" : "❓ Question (Click to flip)")}
+                          </div>
+                          <div style={{ fontSize: 15, fontWeight: flipped ? 500 : 700, color: flipped ? "var(--ink)" : "var(--alpha-dark)", lineHeight: 1.6 }}>
+                            {flipped ? c.back : c.front}
                           </div>
                         </div>
                       );
                     })}
                   </div>
-                )}
+                ) : null}
               </div>
             )}
 
             {/* MIND MAP TAB */}
             {tab === "mind" && (
               <div>
-                <h3 style={{ marginTop: 0 }}>{t("mindTitle")}</h3>
-                <p className="hint">{t("mindHint")}</p>
-                <div className="map-scroll" style={{ padding: "20px 10px", overflowX: "auto" }}>
+                <h3 style={{ marginTop: 0 }}>{isAr ? "خريطة المفاهيم التفاعلية" : "Interactive Concept Mind Map"}</h3>
+                <div style={{ border: "1.5px solid var(--line)", borderRadius: 16, overflow: "auto", background: "#fbfaff", padding: 20 }}>
                   {renderMindMapSVG()}
                 </div>
               </div>
             )}
 
-            {/* AI TUTOR CHAT TAB */}
+            {/* CHAT TAB */}
             {tab === "chat" && (
               <div>
-                <h3 style={{ marginTop: 0 }}>{t("chatTitle")}</h3>
-                <div id="chatLog" style={{ display: "flex", flexDirection: "column", gap: 12, margin: "16px 0", maxHeight: 420, overflowY: "auto" }}>
-                  {chatHistory.length === 0 && (
-                    <div style={{ padding: 20, textAlign: "center", color: "var(--muted)", background: "#faf9fe", borderRadius: 14 }}>
-                      {isAr
-                        ? `مرحباً! أنا مدرسك الذكي لدورة "${outline.title || course.topic}". اسألني أي سؤال حول درس "${curLessonTitle}".`
-                        : `Hello! I am your AI Tutor for "${outline.title || course.topic}". Ask me anything about "${curLessonTitle}".`}
-                    </div>
-                  )}
-                  {chatHistory.map((m, i) => (
-                    <div
-                      key={i}
-                      style={{
-                        background: m.role === "user" ? "#f3f4f6" : "var(--alpha-50)",
-                        borderRadius: 14,
-                        padding: "12px 18px",
-                        whiteSpace: "pre-wrap",
-                        alignSelf: m.role === "user" ? "flex-end" : "flex-start",
-                        maxWidth: "85%",
-                        border: m.role === "user" ? "1px solid #e5e7eb" : "1px solid #e9d5ff",
-                      }}
-                    >
-                      <div style={{ fontWeight: 700, fontSize: 12, color: "var(--muted)", marginBottom: 4 }}>
-                        {m.role === "user" ? (isAr ? "أنت" : "You") : (isAr ? "المدرس الذكي" : "AI Tutor")}
+                <h3 style={{ marginTop: 0 }}>{isAr ? "اسأل المعلم الذكي عن هذا الدرس" : "Ask the AI Tutor About This Lesson"}</h3>
+                <div className="chat-box" style={{ minHeight: 280, maxHeight: 440, overflowY: "auto", border: "1px solid var(--line)", borderRadius: 14, padding: 16, marginBottom: 14, background: "#faf9fe" }}>
+                  {chatHistory.length === 0 ? (
+                    <p style={{ color: "var(--muted)", textAlign: "center", marginTop: 80 }}>
+                      {isAr ? "اطرح أي سؤال أو اطلب توضيح نقطة معينة في هذا الدرس وسيجيبك المعلم فوراً." : "Ask any question or request clarification on this lesson."}
+                    </p>
+                  ) : (
+                    chatHistory.map((m, i) => (
+                      <div
+                        key={i}
+                        style={{
+                          marginBottom: 12,
+                          display: "flex",
+                          flexDirection: "column",
+                          alignItems: m.role === "user" ? "flex-end" : "flex-start",
+                        }}
+                      >
+                        <div
+                          style={{
+                            maxWidth: "80%",
+                            padding: "10px 16px",
+                            borderRadius: 14,
+                            background: m.role === "user" ? "var(--alpha)" : "#ffffff",
+                            color: m.role === "user" ? "#ffffff" : "var(--ink)",
+                            border: m.role === "user" ? "none" : "1px solid var(--line)",
+                            fontSize: 14,
+                            lineHeight: 1.6,
+                            whiteSpace: "pre-wrap",
+                          }}
+                        >
+                          {m.text}
+                        </div>
                       </div>
-                      {m.text}
-                    </div>
-                  ))}
+                    ))
+                  )}
                   {chatStreaming && (
-                    <div style={{ background: "var(--alpha-50)", borderRadius: 14, padding: "12px 18px", maxWidth: "85%" }}>
-                      <span className="pulse">{t("thinking")}</span>
+                    <div style={{ color: "var(--muted)", fontSize: 13 }}>
+                      <em>{isAr ? "المعلم يكتب..." : "Tutor is typing..."}</em>
                     </div>
                   )}
                 </div>
                 <div style={{ display: "flex", gap: 10 }}>
                   <input
                     className="field"
-                    placeholder={t("chatPh")}
+                    placeholder={isAr ? "اكتب سؤالك هنا..." : "Type your question here..."}
                     value={chatInput}
                     onChange={(e) => setChatInput(e.target.value)}
                     onKeyDown={(e) => { if (e.key === "Enter") handleSendChat(); }}
                   />
-                  <button className="btn btn-primary" onClick={handleSendChat}>{t("send")}</button>
+                  <button className="btn btn-primary" onClick={handleSendChat}>
+                    {t("send")}
+                  </button>
                 </div>
               </div>
             )}
-          </div>
-
-          {/* Navigation Controls */}
-          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, marginTop: 18, flexWrap: "wrap" }}>
-            <button className="btn btn-ghost" style={{ padding: "11px 24px" }} onClick={() => stepLesson(-1)}>
-              {t("prev")}
-            </button>
-            <button className="btn btn-primary" style={{ padding: "11px 26px" }} onClick={completeAndNext}>
-              {t("doneNext")}
-            </button>
           </div>
         </div>
       </div>
