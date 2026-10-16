@@ -1,0 +1,5 @@
+{
+  "name": "TutorAI",
+  "description": "Next Level AI Tutoring for Life-Long Learners",
+  "capabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
