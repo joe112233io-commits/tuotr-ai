@@ -36,7 +36,6 @@ export const Navbar: React.FC<NavbarProps> = ({ currentLang, setLang, onOpenSign
           <a href="#/create-course" onClick={(e) => { e.preventDefault(); handleNav("#/create-course"); }}>{t("navCreate")}</a>
           <a href="#/pricing" onClick={(e) => { e.preventDefault(); handleNav("#/pricing"); }}>{t("navPricing")}</a>
           <a href="#/library" onClick={(e) => { e.preventDefault(); handleNav("#/library"); }}>{t("navLibrary")}</a>
-          <a href="#/settings" onClick={(e) => { e.preventDefault(); handleNav("#/settings"); }}>{t("navSettings")}</a>
           <a href="#/contact-us" onClick={(e) => { e.preventDefault(); handleNav("#/contact-us"); }}>{t("navContact")}</a>
         </div>
         <button className="btn btn-ghost menu-btn" onClick={() => setMenuOpen(!menuOpen)} aria-label={t("menu")} style={{ padding: "9px 14px" }}>

@@ -130,9 +130,25 @@ export function App() {
   } else if (page === "contact-us") {
     pageContent = <Contact currentLang={currentLang} onToast={addToast} />;
   } else if (page === "profile") {
-    pageContent = <Profile currentLang={currentLang} navigate={navigate} onOpenSignIn={() => openSignInModal()} />;
+    pageContent = (
+      <Profile
+        currentLang={currentLang}
+        navigate={navigate}
+        onOpenSignIn={() => openSignInModal()}
+        onToast={addToast}
+        initialTab="profile"
+      />
+    );
   } else if (page === "settings") {
-    pageContent = <Settings currentLang={currentLang} onToast={addToast} />;
+    pageContent = (
+      <Profile
+        currentLang={currentLang}
+        navigate={navigate}
+        onOpenSignIn={() => openSignInModal()}
+        onToast={addToast}
+        initialTab="settings"
+      />
+    );
   } else if (page === "course" && parts[1]) {
     pageContent = (
       <CourseDetail
