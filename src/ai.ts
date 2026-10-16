@@ -351,6 +351,74 @@ export const AIProvider = {
     if (!resp.ok) throw new Error(data.error || "Failed");
     return { text: data.text || "OK", elapsed };
   },
+
+  async fetchModels(customBaseUrl?: string, customApiKey?: string): Promise<string[]> {
+    const s = this.settings;
+    const baseUrl = customBaseUrl || s.baseUrl;
+    const apiKey = customApiKey !== undefined ? customApiKey : s.apiKey;
+
+    if (!baseUrl) {
+      throw new Error("Base URL is required to fetch models.");
+    }
+
+    const resp = await fetch("/api/ai/models", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        customBaseUrl: baseUrl,
+        customApiKey: apiKey,
+        providerType: this.presetType(),
+      }),
+    });
+
+    const data = await resp.json();
+    if (!resp.ok) {
+      throw new Error(data.error || `HTTP ${resp.status} - Failed to fetch models`);
+    }
+
+    if (!Array.isArray(data.models) || data.models.length === 0) {
+      throw new Error("No models returned by provider endpoint.");
+    }
+
+    return data.models;
+  },
+
+  async testModel(modelId: string, customBaseUrl?: string, customApiKey?: string): Promise<{ ok: boolean; elapsed: number; text: string; error?: string }> {
+    const s = this.settings;
+    const baseUrl = customBaseUrl || s.baseUrl;
+    const apiKey = customApiKey !== undefined ? customApiKey : s.apiKey;
+    const t0 = performance.now();
+
+    try {
+      const resp = await fetch("/api/ai/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          instruction: "Respond with the single word: OK",
+          model: modelId,
+          customApiKey: apiKey,
+          customBaseUrl: baseUrl,
+          providerType: this.presetType(),
+          temperature: 0.1,
+        }),
+      });
+
+      const elapsed = Math.round(performance.now() - t0);
+      const data = await resp.json();
+
+      if (!resp.ok) {
+        return { ok: false, elapsed, text: "", error: data.error || `HTTP ${resp.status}` };
+      }
+
+      if (!data.text || typeof data.text !== "string") {
+        return { ok: false, elapsed, text: "", error: "Empty response content" };
+      }
+
+      return { ok: true, elapsed, text: data.text.trim() };
+    } catch (e: any) {
+      return { ok: false, elapsed: Math.round(performance.now() - t0), text: "", error: e.message || String(e) };
+    }
+  },
 };
 
 // Wire harness transport to AIProvider.generate

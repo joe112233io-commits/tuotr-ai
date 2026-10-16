@@ -254,6 +254,94 @@ async function startServer() {
     });
   });
 
+  // Endpoint to fetch available models from custom AI provider
+  app.post("/api/ai/models", async (req, res) => {
+    const { customBaseUrl, customApiKey, providerType } = req.body;
+
+    if (!customBaseUrl) {
+      res.status(400).json({ error: "Base URL is required to fetch models." });
+      return;
+    }
+
+    const urlCheck = validateCustomUrl(String(customBaseUrl).trim());
+    if (!urlCheck.ok) {
+      res.status(403).json({ error: `SSRF Policy Violation: ${urlCheck.reason}` });
+      return;
+    }
+
+    try {
+      let cleanBase = String(customBaseUrl).trim().replace(/\/+$/, "");
+      cleanBase = cleanBase.replace(/\/chat\/completions$/, "").replace(/\/messages$/, "");
+
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://tutorai.me",
+        "X-Title": "TutorAI",
+      };
+
+      if (providerType === "anthropic") {
+        res.json({
+          models: [
+            "claude-3-5-sonnet-20241022",
+            "claude-3-5-haiku-20241022",
+            "claude-3-opus-20240229",
+          ],
+        });
+        return;
+      }
+
+      if (customApiKey) {
+        headers["Authorization"] = `Bearer ${customApiKey}`;
+      }
+
+      const resp = await fetch(`${cleanBase}/models`, {
+        method: "GET",
+        headers,
+      });
+
+      const rawText = await resp.text();
+      let data: any = {};
+      try {
+        data = JSON.parse(rawText);
+      } catch (e) {
+        res.status(502).json({
+          error: `Provider returned non-JSON response from /models (HTTP ${resp.status}): ${rawText.slice(0, 100)}`,
+        });
+        return;
+      }
+
+      if (!resp.ok) {
+        res.status(resp.status || 502).json({
+          error: data.error?.message || data.message || `Provider /models HTTP ${resp.status}`,
+        });
+        return;
+      }
+
+      let models: string[] = [];
+      if (Array.isArray(data.data)) {
+        models = data.data.map((m: any) => m.id || m.name || String(m)).filter(Boolean);
+      } else if (Array.isArray(data.models)) {
+        models = data.models.map((m: any) => m.id || m.name || String(m)).filter(Boolean);
+      } else if (Array.isArray(data)) {
+        models = data.map((m: any) => m.id || m.name || String(m)).filter(Boolean);
+      }
+
+      // Sort free models first if present, then alphabetical
+      models.sort((a, b) => {
+        const aFree = a.includes(":free") || a.includes("free");
+        const bFree = b.includes(":free") || b.includes("free");
+        if (aFree && !bFree) return -1;
+        if (!aFree && bFree) return 1;
+        return a.localeCompare(b);
+      });
+
+      res.json({ models });
+    } catch (err: any) {
+      console.error("[Server] Fetch models error:", err.message);
+      res.status(502).json({ error: `Failed to fetch models: ${err.message}` });
+    }
+  });
+
   // Vite middleware in development
   const isProd = process.env.NODE_ENV === "production";
   if (!isProd) {

@@ -20,6 +20,14 @@ export const Settings: React.FC<SettingsProps> = ({ currentLang, onToast }) => {
   const [testOkMsg, setTestOkMsg] = useState<string>("");
   const [testErrMsg, setTestErrMsg] = useState<string>("");
 
+  // Auto-fetch & Batch test state
+  const [fetchingModels, setFetchingModels] = useState<boolean>(false);
+  const [fetchedModels, setFetchedModels] = useState<string[]>([]);
+  const [batchTesting, setBatchTesting] = useState<boolean>(false);
+  const [batchProgress, setBatchProgress] = useState<{ current: number; total: number; currentModel: string } | null>(null);
+  const [batchResults, setBatchResults] = useState<Array<{ model: string; ok: boolean; elapsed: number; text?: string; error?: string }>>([]);
+  const [showBatchModal, setShowBatchModal] = useState<boolean>(false);
+
   const isAr = currentLang === "ar";
   const t = (k: string) => (STR as any)[currentLang]?.[k] || (STR.en as any)?.[k] || k;
 
@@ -33,8 +41,68 @@ export const Settings: React.FC<SettingsProps> = ({ currentLang, onToast }) => {
   const activePreset: PresetProvider = presets[presetKey] || presets.openrouter;
   const activeName = AIProvider.activeName(currentLang);
 
+  const handleFetchModels = async () => {
+    if (!settings.baseUrl) {
+      onToast(isAr ? "يرجى إدخال الرابط الأساسي للـ Base URL أولاً" : "Please enter Base URL first", "err");
+      return;
+    }
+    setFetchingModels(true);
+    try {
+      const liveModels = await AIProvider.fetchModels(settings.baseUrl, settings.apiKey);
+      setFetchedModels(liveModels);
+      if (!settings.model && liveModels.length > 0) {
+        setSettings((prev) => ({ ...prev, model: liveModels[0] }));
+      }
+      onToast(
+        isAr
+          ? `تم جلب ${liveModels.length} نموذجاً حياً بنجاح من المزود!`
+          : `Successfully fetched ${liveModels.length} live models from provider!`,
+        "ok"
+      );
+    } catch (err: any) {
+      onToast(err.message || (isAr ? "فشل جلب النماذج" : "Failed to fetch models"), "err");
+    } finally {
+      setFetchingModels(false);
+    }
+  };
+
+  const handleBatchTestModels = async () => {
+    const listToTest =
+      fetchedModels.length > 0
+        ? fetchedModels.slice(0, 12)
+        : (activePreset.models && activePreset.models.length > 0)
+        ? activePreset.models
+        : settings.model
+        ? [settings.model]
+        : [];
+
+    if (listToTest.length === 0) {
+      onToast(isAr ? "لا توجد نماذج متاحة للاختبار" : "No models available to test", "err");
+      return;
+    }
+
+    setBatchTesting(true);
+    setShowBatchModal(true);
+    setBatchResults([]);
+
+    const results: Array<{ model: string; ok: boolean; elapsed: number; text?: string; error?: string }> = [];
+
+    for (let i = 0; i < listToTest.length; i++) {
+      const m = listToTest[i];
+      setBatchProgress({ current: i + 1, total: listToTest.length, currentModel: m });
+
+      const res = await AIProvider.testModel(m, settings.baseUrl, settings.apiKey);
+      results.push({ model: m, ...res });
+      setBatchResults([...results]);
+    }
+
+    setBatchTesting(false);
+    setBatchProgress(null);
+  };
+
   const handleSelectPreset = (key: string) => {
     setPresetKey(key);
+    setFetchedModels([]);
     const p = presets[key];
     if (p) {
       setSettings((prev) => ({
@@ -482,9 +550,40 @@ export const Settings: React.FC<SettingsProps> = ({ currentLang, onToast }) => {
 
           {/* Model Name & Quick Selector Chips */}
           <div style={{ marginBottom: 20 }}>
-            <label style={{ display: "block", fontWeight: 600, fontSize: 14, marginBottom: 6, color: "var(--ink)" }}>
-              {t("modelL")}
-            </label>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6, flexWrap: "wrap", gap: 8 }}>
+              <label style={{ fontWeight: 600, fontSize: 14, color: "var(--ink)", margin: 0 }}>
+                {t("modelL")}
+              </label>
+              <button
+                type="button"
+                disabled={fetchingModels || !settings.baseUrl}
+                onClick={handleFetchModels}
+                style={{
+                  background: "var(--alpha-50)",
+                  border: "1px solid #c4b5fd",
+                  color: "var(--alpha-dark)",
+                  fontSize: 12,
+                  padding: "4px 12px",
+                  borderRadius: 8,
+                  fontWeight: 700,
+                  cursor: "pointer",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 6,
+                }}
+              >
+                {fetchingModels ? (
+                  <>
+                    <span className="spin">⚡</span> {isAr ? "جارٍ الجلب..." : "Fetching..."}
+                  </>
+                ) : (
+                  <>
+                    🔄 {isAr ? "جلب النماذج الحية تلقائياً من المزود" : "Auto-Fetch Live Models"}
+                  </>
+                )}
+              </button>
+            </div>
+
             <input
               className="field"
               list="modelList"
@@ -494,14 +593,52 @@ export const Settings: React.FC<SettingsProps> = ({ currentLang, onToast }) => {
               onChange={(e) => setSettings({ ...settings, model: e.target.value })}
             />
             <datalist id="modelList">
-              {(activePreset.models || []).map((m) => (
+              {Array.from(new Set([...fetchedModels, ...(activePreset.models || [])])).map((m) => (
                 <option key={m} value={m} />
               ))}
             </datalist>
 
+            {/* Live Fetched Models Section */}
+            {fetchedModels.length > 0 && (
+              <div style={{ marginTop: 10, background: "#f0fdf4", border: "1px solid #bbf7d0", padding: "10px 14px", borderRadius: 10 }}>
+                <span style={{ fontSize: 12, color: "#166534", fontWeight: 700, display: "block", marginBottom: 6 }}>
+                  ✨ {isAr ? `النماذج المجلوبة حياً (${fetchedModels.length} نموذجاً):` : `Live Fetched Models (${fetchedModels.length}):`}
+                </span>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap", maxHeight: 120, overflowY: "auto" }}>
+                  {fetchedModels.slice(0, 20).map((m) => {
+                    const isSelectedModel = settings.model === m;
+                    const isFreeModel = m.includes(":free") || m.includes("free");
+                    return (
+                      <button
+                        key={m}
+                        type="button"
+                        onClick={() => handleSelectModel(m)}
+                        style={{
+                          border: isSelectedModel ? "1.5px solid #16a34a" : "1px solid #bbf7d0",
+                          background: isSelectedModel ? "#16a34a" : "#ffffff",
+                          color: isSelectedModel ? "#fff" : "#166534",
+                          padding: "3px 9px",
+                          borderRadius: 6,
+                          fontSize: 11,
+                          fontWeight: isSelectedModel ? 700 : 500,
+                          cursor: "pointer",
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 4,
+                        }}
+                      >
+                        {isFreeModel && <span>🎁</span>}
+                        <span>{m}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             {/* Quick Model Chips */}
             {activePreset.models && activePreset.models.length > 0 && (
-              <div style={{ marginTop: 6 }}>
+              <div style={{ marginTop: 10 }}>
                 <span style={{ fontSize: 12, color: "var(--muted)", fontWeight: 600, display: "block", marginBottom: 6 }}>
                   {t("quickModels")}
                 </span>
@@ -636,7 +773,7 @@ export const Settings: React.FC<SettingsProps> = ({ currentLang, onToast }) => {
             className="btn btn-ghost"
             disabled={testing || !settings.enabled}
             onClick={handleTest}
-            style={{ minWidth: 160 }}
+            style={{ minWidth: 150 }}
           >
             {testing ? (
               <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
@@ -644,6 +781,20 @@ export const Settings: React.FC<SettingsProps> = ({ currentLang, onToast }) => {
               </span>
             ) : (
               `🔌 ${t("testConn")}`
+            )}
+          </button>
+          <button
+            className="btn btn-ghost"
+            disabled={batchTesting || testing || !settings.enabled}
+            onClick={handleBatchTestModels}
+            style={{ minWidth: 180, borderColor: "var(--alpha)", color: "var(--alpha)", fontWeight: 700 }}
+          >
+            {batchTesting ? (
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                <span className="spin" style={{ display: "inline-block" }}>🧪</span> {isAr ? "جارٍ اختبار الكل..." : "Testing All..."}
+              </span>
+            ) : (
+              `🧪 ${isAr ? "اختبار جميع النماذج" : "Test All Models"}`
             )}
           </button>
           <button
@@ -663,6 +814,128 @@ export const Settings: React.FC<SettingsProps> = ({ currentLang, onToast }) => {
             ↺ {t("resetDefaults")}
           </button>
         </div>
+
+      {/* Batch Test Modal */}
+      {showBatchModal && (
+        <div
+          style={{
+            position: "fixed",
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            background: "rgba(0,0,0,.6)",
+            backdropFilter: "blur(4px)",
+            zIndex: 9999,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 20,
+          }}
+        >
+          <div
+            className="panel"
+            style={{
+              width: "100%",
+              maxWidth: 680,
+              maxHeight: "85vh",
+              overflowY: "auto",
+              borderRadius: 20,
+              boxShadow: "0 20px 50px rgba(0,0,0,.3)",
+            }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+              <h3 style={{ margin: 0, fontSize: 20, display: "flex", alignItems: "center", gap: 8 }}>
+                <span>🧪</span>
+                <span>{isAr ? "اختبار أداء واستجابة النماذج" : "Batch Models Diagnostic Test"}</span>
+              </h3>
+              <button
+                className="btn btn-ghost"
+                style={{ padding: "4px 12px", fontSize: 16 }}
+                onClick={() => setShowBatchModal(false)}
+              >
+                ✕
+              </button>
+            </div>
+
+            {batchProgress && (
+              <div style={{ marginBottom: 16, background: "#f8fafc", padding: "12px 16px", borderRadius: 12, border: "1px solid var(--line)" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, fontWeight: 700, color: "var(--alpha-dark)", marginBottom: 6 }}>
+                  <span>{isAr ? `فحص النموذج (${batchProgress.current}/${batchProgress.total}):` : `Testing model (${batchProgress.current}/${batchProgress.total}):`}</span>
+                  <span>{Math.round((batchProgress.current / batchProgress.total) * 100)}%</span>
+                </div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: "var(--ink)", marginBottom: 8 }}>
+                  <code>{batchProgress.currentModel}</code>
+                </div>
+                <div className="progress" style={{ height: 8 }}>
+                  <div style={{ width: `${(batchProgress.current / batchProgress.total) * 100}%` }}></div>
+                </div>
+              </div>
+            )}
+
+            <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 20 }}>
+              {batchResults.map((r, idx) => (
+                <div
+                  key={idx}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    padding: "10px 14px",
+                    borderRadius: 12,
+                    background: r.ok ? "#f0fdf4" : "#fef2f2",
+                    border: `1px solid ${r.ok ? "#bbf7d0" : "#fecaca"}`,
+                    gap: 12,
+                    flexWrap: "wrap",
+                  }}
+                >
+                  <div style={{ flex: 1, minWidth: 200 }}>
+                    <div style={{ fontWeight: 700, fontSize: 13, color: r.ok ? "#14532d" : "#991b1b" }}>
+                      {r.ok ? "✅" : "❌"} <code>{r.model}</code>
+                    </div>
+                    {r.ok ? (
+                      <div style={{ fontSize: 12, color: "#166534", marginTop: 2 }}>
+                        {isAr ? `زمن الاستجابة: ${r.elapsed}ms` : `Latency: ${r.elapsed}ms`} · ({r.text})
+                      </div>
+                    ) : (
+                      <div style={{ fontSize: 12, color: "#991b1b", marginTop: 2 }}>
+                        {r.error}
+                      </div>
+                    )}
+                  </div>
+
+                  {r.ok && (
+                    <button
+                      className="btn btn-primary"
+                      style={{ padding: "4px 12px", fontSize: 12 }}
+                      onClick={() => {
+                        handleSelectModel(r.model);
+                        onToast(isAr ? `تم اختيار النموذج ${r.model}` : `Selected model ${r.model}`, "ok");
+                        setShowBatchModal(false);
+                      }}
+                    >
+                      {isAr ? "تحديد كـ نشط" : "Use This"}
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+
+            {!batchTesting && (
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: "1px solid var(--line)", paddingTop: 16 }}>
+                <span style={{ fontSize: 13, color: "var(--muted)" }}>
+                  {isAr
+                    ? `اكتمل الفحص: ${batchResults.filter((x) => x.ok).length} من أصل ${batchResults.length} نماذج تعمل بنجاح.`
+                    : `Done: ${batchResults.filter((x) => x.ok).length} of ${batchResults.length} models functional.`}
+                </span>
+                <button className="btn btn-primary" onClick={() => setShowBatchModal(false)}>
+                  {isAr ? "تم وإغلاق" : "Close"}
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
         {/* Security & Local Storage Note */}
         <div className="kv-note" style={{ marginTop: 22, fontSize: 13, lineHeight: 1.5 }}>
