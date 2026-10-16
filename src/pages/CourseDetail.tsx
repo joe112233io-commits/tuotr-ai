@@ -36,6 +36,11 @@ export const CourseDetail: React.FC<CourseDetailProps> = ({ slug, currentLang, n
   const [chatStreaming, setChatStreaming] = useState(false);
   const [speaking, setSpeaking] = useState(false);
   const [outlineError, setOutlineError] = useState<string | null>(null);
+  const [missingSequenceLessons, setMissingSequenceLessons] = useState<
+    { modIdx: number; lesIdx: number; title: string; key: string; modTitle: string }[]
+  >([]);
+  const [batchGenerating, setBatchGenerating] = useState(false);
+  const [batchProgressText, setBatchProgressText] = useState("");
 
   const t = (k: string) => (STR as any)[currentLang][k] || (STR.en as any)[k] || k;
   const isAr = currentLang === "ar";
@@ -111,10 +116,38 @@ export const CourseDetail: React.FC<CourseDetailProps> = ({ slug, currentLang, n
 
     const cachedHtml = course.lessons?.[lessonIdKey];
     if (cachedHtml && cachedHtml.trim().length > 60) {
+      setMissingSequenceLessons([]);
       setLessonHtml(cachedHtml);
       return;
     }
 
+    // (Sequential Scaffolding Protection: Halt out-of-order generation)
+    const flatLessons: { modIdx: number; lesIdx: number; title: string; key: string; modTitle: string }[] = [];
+    course.outline.modules.forEach((m, mI) => {
+      m.lessons.forEach((l, lI) => {
+        flatLessons.push({
+          modIdx: mI,
+          lesIdx: lI,
+          title: l,
+          key: `${mI}:${lI}`,
+          modTitle: m.title,
+        });
+      });
+    });
+
+    const curFlatIdx = flatLessons.findIndex((item) => item.modIdx === modIdx && item.lesIdx === lesIdx);
+    if (curFlatIdx > 0) {
+      const missingPrior = flatLessons.slice(0, curFlatIdx).filter((item) => !course.lessonDocs?.[item.key]);
+      if (missingPrior.length > 0) {
+        // Halt generation! Do not generate silently without prerequisite context!
+        setMissingSequenceLessons(missingPrior);
+        setLessonLoading(false);
+        setLessonHtml("");
+        return;
+      }
+    }
+
+    setMissingSequenceLessons([]);
     setLessonLoading(true);
     setLessonHtml("");
     let streamingHtml = "";
@@ -160,7 +193,7 @@ export const CourseDetail: React.FC<CourseDetailProps> = ({ slug, currentLang, n
 
       // (3) Rehydrate CourseBrain explicitly
       const brain = getBrain(slug);
-      rehydrate(brain, covered, usedTerms, course.glossary);
+      rehydrate(brain, covered, usedTerms, course.glossary, course.masterSummary);
 
       const result = await CourseAI.generateLessonStream(
         course.title || course.topic,
@@ -183,6 +216,7 @@ export const CourseDetail: React.FC<CourseDetailProps> = ({ slug, currentLang, n
           course,
           brainCovered: covered,
           brainUsedTerms: usedTerms,
+          masterSummary: course.masterSummary,
           glossary: course.glossary,
         }
       );
@@ -192,6 +226,7 @@ export const CourseDetail: React.FC<CourseDetailProps> = ({ slug, currentLang, n
       course.lessonDocs[lessonIdKey] = result.doc;
       if (!course.lessons) course.lessons = {};
       course.lessons[lessonIdKey] = result.html;
+      course.masterSummary = result.masterSummary;
 
       // (5) Update brainCovered with current lesson
       if (!course.brainCovered) course.brainCovered = [];
@@ -230,6 +265,77 @@ export const CourseDetail: React.FC<CourseDetailProps> = ({ slug, currentLang, n
       setLessonHtml("");
     } finally {
       setLessonLoading(false);
+    }
+  };
+
+  const handleGenerateMissingSequence = async () => {
+    if (!course || !course.outline || missingSequenceLessons.length === 0) return;
+    setBatchGenerating(true);
+    setLessonError(null);
+
+    try {
+      const personal = course.personal ? await Store.getPersonalization() : null;
+      const totalLessons = course.outline.modules.reduce((acc, m) => acc + m.lessons.length, 0);
+
+      for (let i = 0; i < missingSequenceLessons.length; i++) {
+        const item = missingSequenceLessons[i];
+        setBatchProgressText(
+          isAr
+            ? `جارٍ توليد الدرس السابق (${i + 1}/${missingSequenceLessons.length}): "${item.title}"...`
+            : `Generating preceding lesson (${i + 1}/${missingSequenceLessons.length}): "${item.title}"...`
+        );
+
+        if (course.lessonDocs?.[item.key]) continue;
+
+        let covered = course.brainCovered ? [...course.brainCovered] : [];
+        let usedTerms = course.brainUsedTerms ? [...course.brainUsedTerms] : [];
+        const brain = getBrain(slug);
+        rehydrate(brain, covered, usedTerms, course.glossary, course.masterSummary);
+
+        const result = await CourseAI.generateLessonStream(
+          course.title || course.topic,
+          course.topic,
+          item.modTitle,
+          item.title,
+          personal,
+          course.lang || currentLang,
+          undefined,
+          {
+            slug,
+            lessonIndex: item.lesIdx,
+            totalLessons,
+            outline: course.outline,
+            settings: course.settings,
+            difficulty: course.settings?.difficulty || "beginner",
+            course,
+            brainCovered: covered,
+            brainUsedTerms: usedTerms,
+            masterSummary: course.masterSummary,
+            glossary: course.glossary,
+          }
+        );
+
+        if (!course.lessonDocs) course.lessonDocs = {};
+        course.lessonDocs[item.key] = result.doc;
+        if (!course.lessons) course.lessons = {};
+        course.lessons[item.key] = result.html;
+        course.masterSummary = result.masterSummary;
+        course.brainCovered = result.brainCovered;
+        course.brainUsedTerms = result.brainUsedTerms;
+
+        await Store.saveCourse(course);
+      }
+
+      setBatchGenerating(false);
+      setBatchProgressText("");
+      setMissingSequenceLessons([]);
+      // Proceed to load/generate target lesson
+      await loadLessonContent();
+    } catch (e: any) {
+      console.error("[CourseDetail] Sequential batch generation failed:", e);
+      setBatchGenerating(false);
+      const msg = e instanceof HarnessError ? e.message : (e.message || t("lessonFail"));
+      setLessonError(msg);
     }
   };
 
@@ -857,6 +963,54 @@ export const CourseDetail: React.FC<CourseDetailProps> = ({ slug, currentLang, n
                   })()}
                 </div>
 
+                {/* Missing Prerequisite Sequence Card */}
+                {missingSequenceLessons.length > 0 && !lessonLoading && !lessonError && (
+                  <div style={{ padding: "24px 28px", background: "#fffbeb", border: "1.5px solid #fde68a", borderRadius: 16, margin: "16px 0" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 10, color: "#92400e", fontWeight: 800, fontSize: 17, marginBottom: 8 }}>
+                      <span style={{ fontSize: 24 }}>⚠️</span>
+                      <span>{isAr ? "دروس سابقة مفقودة في التسلسل البيداغوجي" : "Prerequisite Lessons Missing in Sequence"}</span>
+                    </div>
+                    <p style={{ color: "#78350f", fontSize: 14, margin: "0 0 16px", lineHeight: 1.6 }}>
+                      {isAr
+                        ? `هذا الدرس ("${curLessonTitle}") يفترض استيعاب مفاهيم تراكمية تم شرحها في الدروس السابقة. لتجنب الفجوات المعرفية وضمان سلامة سياق الذاكرة التراكمية، يجب توليد الدروس السابقة أولاً:`
+                        : `This lesson ("${curLessonTitle}") builds upon cumulative concepts covered in preceding lessons. To avoid cognitive gaps, preceding lessons must be generated first:`}
+                    </p>
+
+                    <div style={{ background: "#ffffff", border: "1px solid #fde68a", borderRadius: 12, padding: "14px 18px", marginBottom: 18 }}>
+                      <div style={{ fontSize: 11, fontWeight: 700, color: "var(--muted)", textTransform: "uppercase", marginBottom: 8 }}>
+                        {isAr ? "الدروس الناقصة المطلوب توليدها بالترتيب:" : "Missing Preceding Lessons to Generate in Order:"}
+                      </div>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                        {missingSequenceLessons.map((item, idx) => (
+                          <div key={idx} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "#1e1b2e" }}>
+                            <span style={{ fontWeight: 800, color: "#b45309", width: 20 }}>{idx + 1}.</span>
+                            <span style={{ color: "var(--muted)", fontSize: 12 }}>({item.modTitle})</span>
+                            <span style={{ fontWeight: 700 }}>{item.title}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    {batchGenerating ? (
+                      <div style={{ textAlign: "center", padding: "16px 0" }}>
+                        <div className="spinner" style={{ margin: "0 auto 10px" }}></div>
+                        <p className="pulse" style={{ fontWeight: 700, color: "#b45309", fontSize: 14 }}>
+                          {batchProgressText}
+                        </p>
+                      </div>
+                    ) : (
+                      <button
+                        className="btn btn-primary"
+                        onClick={handleGenerateMissingSequence}
+                        style={{ padding: "12px 28px", fontSize: 14, fontWeight: 700, display: "inline-flex", alignItems: "center", gap: 8 }}
+                      >
+                        <span>⚡</span>
+                        <span>{isAr ? "توليد الدروس الناقصة أولاً بالتسلسل" : "Generate Missing Lessons in Sequence"}</span>
+                      </button>
+                    )}
+                  </div>
+                )}
+
                 {lessonLoading && (
                   <div style={{ textAlign: "center", padding: "40px 0" }}>
                     <div className="spinner"></div>
@@ -885,18 +1039,20 @@ export const CourseDetail: React.FC<CourseDetailProps> = ({ slug, currentLang, n
                   </div>
                 )}
 
-                {!lessonLoading && !lessonError && (
+                {!lessonLoading && !lessonError && missingSequenceLessons.length === 0 && Boolean(sanitizedLessonHtml) && (
                   <div dangerouslySetInnerHTML={{ __html: sanitizedLessonHtml }} />
                 )}
 
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 32, paddingTop: 20, borderTop: "1px solid var(--line)" }}>
-                  <button className="btn btn-ghost" onClick={() => stepLesson(-1)}>
-                    {isAr ? "← الدرس السابق" : "← Previous Lesson"}
-                  </button>
-                  <button className="btn btn-primary" onClick={completeAndNext}>
-                    {isAr ? "إتمام والانتقال للدرس التالي →" : "Complete & Next Lesson →"}
-                  </button>
-                </div>
+                {!lessonLoading && missingSequenceLessons.length === 0 && Boolean(sanitizedLessonHtml) && (
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 32, paddingTop: 20, borderTop: "1px solid var(--line)" }}>
+                    <button className="btn btn-ghost" onClick={() => stepLesson(-1)}>
+                      {isAr ? "← الدرس السابق" : "← Previous Lesson"}
+                    </button>
+                    <button className="btn btn-primary" onClick={completeAndNext}>
+                      {isAr ? "إتمام والانتقال للدرس التالي →" : "Complete & Next Lesson →"}
+                    </button>
+                  </div>
+                )}
               </div>
             )}
 

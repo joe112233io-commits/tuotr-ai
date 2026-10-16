@@ -85,6 +85,7 @@ export interface Chain {
   glossary: Term[];
   covered: { title: string; digest: string }[];
   usedTerms: string[];
+  masterSummary: string;
 }
 
 export type TransportFn = (opts: {
@@ -1159,6 +1160,7 @@ export class CourseBrain {
   glossary: Term[] = [];
   covered: { title: string; digest: string }[] = [];
   usedTerms: Set<string> = new Set();
+  masterSummary: string = "";
 
   constructor(slug: string) {
     this.slug = slug;
@@ -1167,7 +1169,8 @@ export class CourseBrain {
   rehydrate(
     brainCovered?: { title: string; digest: string }[],
     brainUsedTerms?: string[],
-    glossary?: Term[]
+    glossary?: Term[],
+    masterSummary?: string
   ) {
     if (glossary && glossary.length > 0 && this.glossary.length === 0) {
       this.glossary = [...glossary];
@@ -1177,6 +1180,9 @@ export class CourseBrain {
     }
     if (brainUsedTerms && Array.isArray(brainUsedTerms) && brainUsedTerms.length > 0) {
       this.usedTerms = new Set(brainUsedTerms.map((t) => t.toLowerCase().trim()));
+    }
+    if (masterSummary && typeof masterSummary === "string" && masterSummary.trim().length > 0) {
+      this.masterSummary = masterSummary.trim();
     }
   }
 
@@ -1190,6 +1196,7 @@ export class CourseBrain {
       glossary: this.glossary,
       covered: [...this.covered],
       usedTerms: Array.from(this.usedTerms),
+      masterSummary: this.masterSummary,
     };
   }
 
@@ -1225,9 +1232,10 @@ export function rehydrate(
   brain: CourseBrain,
   brainCovered?: { title: string; digest: string }[],
   brainUsedTerms?: string[],
-  glossary?: Term[]
+  glossary?: Term[],
+  masterSummary?: string
 ): CourseBrain {
-  brain.rehydrate(brainCovered, brainUsedTerms, glossary);
+  brain.rehydrate(brainCovered, brainUsedTerms, glossary, masterSummary);
   return brain;
 }
 
@@ -1235,6 +1243,65 @@ export const rehydrateBrain = rehydrate;
 
 export function resetBrain(slug: string) {
   brains.delete(slug);
+}
+
+export function validateMasterSummary(raw: any): { valid: boolean; errors: string[]; summary?: string } {
+  const errors: string[] = [];
+  const text = typeof raw === "string" ? raw.trim() : String(raw?.summary || "").trim();
+  if (text.length < 8) {
+    errors.push("Master summary is too short (must be at least 8 characters).");
+  }
+  const words = text.split(/\s+/).filter(Boolean);
+  if (words.length > 60) {
+    errors.push(`Master summary strictly exceeded 60 words ceiling (${words.length} words > 60). Condense into a tight single paragraph under 60 words.`);
+  }
+  if (errors.length > 0) return { valid: false, errors };
+  return { valid: true, errors: [], summary: text };
+}
+
+export async function updateMasterSummary(
+  currentMasterSummary: string,
+  newLessonTitle: string,
+  newLessonDigest: string,
+  lang: string = "en"
+): Promise<string> {
+  const res = await askJSON<{ summary: string }>(
+    "updateMasterSummary",
+    (correctionNote) => `
+You are TutorAI Synthesis Specialist.
+TASK: Update the concise cumulative master summary answering: What has the student mastered up to this point across the curriculum?
+
+PREVIOUS MASTER SUMMARY:
+${currentMasterSummary ? currentMasterSummary : "Course start (No prior lessons)."}
+
+NEWLY COMPLETED LESSON:
+Title: "${newLessonTitle}"
+Digest: ${newLessonDigest}
+
+LANGUAGE: ${lang === "ar" ? "Formal Modern Standard Arabic (الفصحى)" : "English"}
+
+OUTPUT CONTRACT:
+Output ONLY a single valid JSON object strictly matching this schema:
+{
+  "summary": string
+}
+
+STRICT CONSTRAINTS:
+1. State concretely: What skills, knowledge, and capabilities has the student mastered up to this point?
+2. STRICT MAXIMUM: 60 WORDS. Any answer exceeding 60 words will be rejected. Be concise and dense.
+3. Single unified paragraph only.
+${correctionNote || ""}
+`,
+    (raw) => {
+      const v = validateMasterSummary(raw);
+      if (!v.valid) return { valid: false, errors: v.errors };
+      return { valid: true, errors: [], doc: { summary: v.summary! } as any };
+    },
+    2,
+    0.2
+  );
+
+  return typeof res === "string" ? res : (res as any)?.summary || "";
 }
 
 /* ========================================================
@@ -1427,7 +1494,10 @@ ${reinforcesSection}
 ESTABLISHED COURSE GLOSSARY (Strictly lock your 'terms' to terms in this list):
 ${glossaryNames}
 
-PREVIOUSLY COVERED IN EARLIER LESSONS (DO NOT REPEAT, BUILD CUMULATIVELY):
+CUMULATIVE COURSE MASTERY (MASTER SUMMARY):
+${chain.masterSummary ? chain.masterSummary : (lang === "ar" ? "الدرس التأسيسي الأول للدورة (لا توجد دروس سابقة)." : "Initial course foundation lesson (no prior lessons).")}
+
+PREVIOUSLY COVERED LESSON DIGESTS (DO NOT REPEAT, BUILD CUMULATIVELY):
 ${coveredText}
 
 LEARNER PROFILE: ${ctx.personal ? JSON.stringify(ctx.personal) : "None"}

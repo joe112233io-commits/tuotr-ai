@@ -86,6 +86,16 @@ export function migrateCourseBrain(course: Course): Course {
     }
     course.brainUsedTerms = Array.from(used);
   }
+  // If masterSummary is missing, build initial masterSummary under 60 words from restored brainCovered
+  if (!course.masterSummary || typeof course.masterSummary !== "string" || course.masterSummary.trim().length === 0) {
+    if (course.brainCovered && course.brainCovered.length > 0) {
+      const combined = course.brainCovered.map((c) => c.digest).join(" ");
+      const words = combined.split(/\s+/).filter(Boolean);
+      course.masterSummary = words.slice(0, 50).join(" ");
+    } else {
+      course.masterSummary = "";
+    }
+  }
   if (!course.conceptGraph) {
     if (course.outline) {
       course.conceptGraph = buildConceptGraph(course.outline as any);

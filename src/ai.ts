@@ -17,6 +17,7 @@ import {
   HarnessError,
   cleanJson,
   buildConceptGraph,
+  updateMasterSummary,
 } from "./harness";
 
 export interface PresetProvider {
@@ -383,6 +384,7 @@ export const CourseAI = {
       course?: Course;
       brainCovered?: { title: string; digest: string }[];
       brainUsedTerms?: string[];
+      masterSummary?: string;
       glossary?: Term[];
     }
   ): Promise<{
@@ -390,6 +392,7 @@ export const CourseAI = {
     html: string;
     brainCovered: { title: string; digest: string }[];
     brainUsedTerms: string[];
+    masterSummary: string;
   }> {
     const brain = ctx?.slug ? getBrain(ctx.slug) : new CourseBrain("default");
 
@@ -398,7 +401,8 @@ export const CourseAI = {
       brain,
       ctx?.brainCovered || ctx?.course?.brainCovered,
       ctx?.brainUsedTerms || ctx?.course?.brainUsedTerms,
-      ctx?.glossary || ctx?.course?.glossary
+      ctx?.glossary || ctx?.course?.glossary,
+      ctx?.masterSummary || ctx?.course?.masterSummary
     );
 
     if (ctx?.outline) {
@@ -459,10 +463,25 @@ export const CourseAI = {
     // Commit lesson to cumulative memory
     brain.commit(doc, lessonTitle);
 
+    // Update cumulative masterSummary (strictly <= 60 words)
+    let updatedMasterSummary = brain.masterSummary;
+    try {
+      updatedMasterSummary = await updateMasterSummary(
+        brain.masterSummary,
+        lessonTitle,
+        doc.digest,
+        lang
+      );
+      brain.masterSummary = updatedMasterSummary;
+    } catch (err) {
+      console.warn("[CourseAI] Master summary generation warning:", err);
+    }
+
     // Sync state back to course object if provided to guarantee persistence outside memory Map
     if (ctx?.course) {
       ctx.course.brainCovered = [...brain.covered];
       ctx.course.brainUsedTerms = Array.from(brain.usedTerms);
+      ctx.course.masterSummary = updatedMasterSummary;
       if (!ctx.course.glossary || ctx.course.glossary.length === 0) {
         ctx.course.glossary = [...brain.glossary];
       }
@@ -484,6 +503,7 @@ export const CourseAI = {
       html,
       brainCovered: [...brain.covered],
       brainUsedTerms: Array.from(brain.usedTerms),
+      masterSummary: updatedMasterSummary,
     };
   },
 

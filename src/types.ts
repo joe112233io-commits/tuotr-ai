@@ -37,6 +37,7 @@ export interface Course {
   glossary?: Term[];
   brainCovered?: { title: string; digest: string }[];
   brainUsedTerms?: string[];
+  masterSummary?: string;
   conceptGraph?: ConceptGraph;
   lang: string;
 }
