@@ -943,17 +943,61 @@ export const CourseDetail: React.FC<CourseDetailProps> = ({ slug, currentLang, n
             {/* LESSON TAB */}
             {tab === "lesson" && (
               <div>
-                <div style={{ borderBottom: "1px solid var(--line)", paddingBottom: 14, marginBottom: 18 }}>
+                {/* Printable Header (Visible strictly when printing) */}
+                <div className="print-header">
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end" }}>
+                    <div>
+                      <div style={{ fontSize: "11pt", fontWeight: 700, color: "#6b7280" }}>
+                        {course.title || course.topic} &bull; {curModule?.title}
+                      </div>
+                      <h1 style={{ margin: "4px 0 0", fontSize: "20pt", fontWeight: 800, color: "#111827" }}>
+                        {curLessonTitle}
+                      </h1>
+                    </div>
+                    <div style={{ textAlign: isAr ? "left" : "right", fontSize: "10pt", color: "#6b7280" }}>
+                      <div style={{ fontWeight: 700 }}>TutorAI &bull; {isAr ? "منصة التعليم الذكي" : "Smart Learning Platform"}</div>
+                      <div>{new Date().toLocaleDateString(isAr ? "ar-EG" : "en-US", { year: "numeric", month: "long", day: "numeric" })}</div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="no-print" style={{ borderBottom: "1px solid var(--line)", paddingBottom: 14, marginBottom: 18 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
                     <div>
                       <span style={{ fontSize: 12, fontWeight: 700, color: "var(--alpha)" }}>{curModule?.title}</span>
                       <h2 style={{ margin: "4px 0 0", fontSize: 22 }}>{curLessonTitle}</h2>
                     </div>
-                    {progress.done.includes(lessonIdKey) && (
-                      <span className="badge" style={{ background: "#dcfce7", color: "#166534" }}>
-                        ✓ {isAr ? "مكتمل" : "Completed"}
-                      </span>
-                    )}
+                    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                      {!lessonLoading && Boolean(sanitizedLessonHtml) && (
+                        <button
+                          className="btn btn-ghost no-print"
+                          onClick={() => window.print()}
+                          title={isAr ? "طباعة هذا الدرس" : "Print Lesson"}
+                          style={{
+                            padding: "6px 14px",
+                            fontSize: 13,
+                            fontWeight: 700,
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: 6,
+                            border: "1.5px solid var(--alpha)",
+                            borderRadius: 999,
+                            cursor: "pointer",
+                            background: "#ffffff",
+                            color: "var(--alpha-dark)",
+                            boxShadow: "0 2px 8px rgba(124,58,237,0.08)",
+                          }}
+                        >
+                          <span style={{ fontSize: 15 }}>🖨️</span>
+                          <span>{isAr ? "طباعة الدرس" : "Print Lesson"}</span>
+                        </button>
+                      )}
+                      {progress.done.includes(lessonIdKey) && (
+                        <span className="badge" style={{ background: "#dcfce7", color: "#166534" }}>
+                          ✓ {isAr ? "مكتمل" : "Completed"}
+                        </span>
+                      )}
+                    </div>
                   </div>
 
                   {/* Scaffolding Concept Badges */}
@@ -1166,9 +1210,28 @@ export const CourseDetail: React.FC<CourseDetailProps> = ({ slug, currentLang, n
                 )}
 
                 {!lessonLoading && missingSequenceLessons.length === 0 && Boolean(sanitizedLessonHtml) && (
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 32, paddingTop: 20, borderTop: "1px solid var(--line)" }}>
+                  <div className="no-print" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 32, paddingTop: 20, borderTop: "1px solid var(--line)", flexWrap: "wrap", gap: 12 }}>
                     <button className="btn btn-ghost" onClick={() => stepLesson(-1)}>
                       {isAr ? "← الدرس السابق" : "← Previous Lesson"}
+                    </button>
+                    <button
+                      className="btn btn-ghost"
+                      onClick={() => window.print()}
+                      style={{
+                        padding: "8px 18px",
+                        fontSize: 13,
+                        fontWeight: 700,
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: 6,
+                        border: "1.5px solid var(--alpha)",
+                        borderRadius: 999,
+                        color: "var(--alpha-dark)",
+                        background: "#ffffff",
+                      }}
+                    >
+                      <span style={{ fontSize: 15 }}>🖨️</span>
+                      <span>{isAr ? "طباعة الدرس" : "Print Lesson"}</span>
                     </button>
                     <button className="btn btn-primary" onClick={completeAndNext}>
                       {isAr ? "إتمام والانتقال للدرس التالي →" : "Complete & Next Lesson →"}

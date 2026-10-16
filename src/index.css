@@ -206,3 +206,135 @@ button.opt.sel{border-color:var(--alpha);background:var(--alpha-50);color:var(--
   transform: translateY(-2px);
   box-shadow: 0 6px 18px -4px rgba(124,58,237,.2) !important;
 }
+
+/* PRINT OPTIMIZATION (Print Lesson Only) */
+.print-header {
+  display: none;
+}
+
+@media print {
+  /* Hide web chrome: navs, sidebars, footers, tabs, buttons, toasts, modals, etc. */
+  nav, .nav, footer, .tabs, .modules, .no-print, button, #toastCtn, .overlay, .modal, .progress, .page-head, .hero, .badge, .kv-note {
+    display: none !important;
+  }
+
+  body, html {
+    background: #ffffff !important;
+    color: #111111 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    font-size: 11pt !important;
+    line-height: 1.6 !important;
+    font-family: "Segoe UI", system-ui, -apple-system, Roboto, "Noto Kufi Arabic", Arial, sans-serif !important;
+  }
+
+  .main-container, .course-layout {
+    max-width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    display: block !important;
+    box-shadow: none !important;
+  }
+
+  .lesson-body {
+    border: none !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    background: #ffffff !important;
+    min-height: auto !important;
+  }
+
+  .print-header {
+    display: block !important;
+    border-bottom: 2px solid #7c3aed !important;
+    padding-bottom: 12px !important;
+    margin-bottom: 24px !important;
+  }
+
+  .print-header h1 {
+    font-size: 20pt !important;
+    margin: 6px 0 0 0 !important;
+    color: #1e1b2e !important;
+    font-weight: 800 !important;
+  }
+
+  .print-header p, .print-header div {
+    font-size: 10pt !important;
+    color: #4b5563 !important;
+  }
+
+  /* Lesson Body Typography for Print */
+  .lesson-body h1, .lesson-body h2, .lesson-body h3, .lesson-body h4 {
+    color: #111827 !important;
+    page-break-after: avoid !important;
+    break-after: avoid !important;
+    margin-top: 18pt !important;
+    margin-bottom: 8pt !important;
+  }
+
+  .lesson-body h2 {
+    font-size: 16pt !important;
+    border-bottom: 1px solid #e5e7eb !important;
+    padding-bottom: 4px !important;
+  }
+
+  .lesson-body h3 {
+    font-size: 13pt !important;
+  }
+
+  .lesson-body p, .lesson-body li {
+    font-size: 11pt !important;
+    line-height: 1.65 !important;
+    color: #1f2937 !important;
+  }
+
+  /* Prevent awkward pagination breaks inside blocks */
+  p, li, .tbl-wrap, pre, table, tr, blockquote, .note-box, div[style*="border"] {
+    page-break-inside: avoid !important;
+    break-inside: avoid !important;
+  }
+
+  /* Tables in Print */
+  .tbl-wrap {
+    border: 1px solid #d1d5db !important;
+    border-radius: 6px !important;
+    margin: 14pt 0 !important;
+  }
+
+  table {
+    border-collapse: collapse !important;
+    width: 100% !important;
+  }
+
+  th, td {
+    border: 1px solid #e5e7eb !important;
+    padding: 8px 12px !important;
+    font-size: 10pt !important;
+  }
+
+  thead th {
+    background: #f3f4f6 !important;
+    color: #111827 !important;
+    font-weight: 700 !important;
+  }
+
+  /* Code blocks in Print */
+  pre {
+    background: #f9fafb !important;
+    color: #111827 !important;
+    border: 1px solid #e5e7eb !important;
+    border-radius: 6px !important;
+    padding: 10pt !important;
+    font-size: 9.5pt !important;
+    white-space: pre-wrap !important;
+    word-break: break-all !important;
+  }
+
+  code {
+    background: #f3f4f6 !important;
+    color: #111827 !important;
+    padding: 1px 4px !important;
+    border-radius: 4px !important;
+  }
+}
