@@ -20,13 +20,13 @@ export const Home: React.FC<HomeProps> = ({ currentLang, navigate, onToast }) =>
   const faqs = isAr ? LISTS.faqAr : LISTS.faq;
   const stats = [["800K+", t("stat1")], ["10M+", t("stat2")], ["14+", t("stat3")], ["23+", t("stat4")]] as const;
 
-  const handleStart = (topic: string) => {
-    const tpc = (topic || "").trim();
-    if (tpc.length < 2) {
-      onToast(t("needTopic"), "err");
-      return;
+  const handleStart = (topic?: string) => {
+    const tpc = (topic !== undefined ? topic : searchTopic || "").trim();
+    if (tpc.length > 0) {
+      sessionStorage.setItem("tutorai.pendingTopic", tpc);
+    } else {
+      sessionStorage.removeItem("tutorai.pendingTopic");
     }
-    sessionStorage.setItem("tutorai.pendingTopic", tpc);
     navigate("#/create-course");
   };
 
