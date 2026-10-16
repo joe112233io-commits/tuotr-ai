@@ -14,6 +14,77 @@ interface CourseDetailProps {
   onToast: (msg: string, kind?: string) => void;
 }
 
+export function cleanStreamPreview(rawStream: string, isAr: boolean = true): string {
+  if (!rawStream) return "";
+
+  try {
+    const cleaned = rawStream.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
+    const firstBrace = cleaned.indexOf("{");
+    if (firstBrace >= 0) {
+      const lastBrace = cleaned.lastIndexOf("}");
+      const sliceJson = lastBrace > firstBrace ? cleaned.slice(firstBrace, lastBrace + 1) : cleaned.slice(firstBrace);
+      const parsed = JSON.parse(sliceJson);
+      if (parsed && typeof parsed === "object") {
+        let formatted = "";
+        if (parsed.goal) {
+          formatted += `🎯 ${isAr ? "هدف الدرس:" : "Goal:"} ${parsed.goal}\n\n`;
+        }
+        if (Array.isArray(parsed.blocks)) {
+          for (const b of parsed.blocks) {
+            if (!b || typeof b !== "object") continue;
+            if (b.k === "h" && b.t) {
+              formatted += `\n📌 ${b.t}\n\n`;
+            } else if (b.k === "p" && b.t) {
+              formatted += `${b.t}\n\n`;
+            } else if ((b.k === "ul" || b.k === "ol") && Array.isArray(b.items)) {
+              for (const item of b.items) {
+                if (item) formatted += `• ${item}\n`;
+              }
+              formatted += `\n`;
+            } else if (b.k === "note" && b.t) {
+              formatted += `💡 ${b.title ? b.title + ": " : ""}${b.t}\n\n`;
+            } else if (b.k === "qa" && (b.q || b.a)) {
+              if (b.q) formatted += `❓ ${b.q}\n`;
+              if (b.a) formatted += `✅ ${b.a}\n\n`;
+            } else if (b.k === "code" && b.t) {
+              formatted += `\`\`\`${b.lang || ""}\n${b.t}\n\`\`\`\n\n`;
+            }
+          }
+        }
+        if (parsed.takeaway) {
+          formatted += `\n💎 ${isAr ? "الخلاصة:" : "Key Takeaway:"} ${parsed.takeaway}\n`;
+        }
+        if (formatted.trim()) return formatted.trim();
+      }
+    }
+  } catch (e) {
+    // Stream in progress
+  }
+
+  const stringValRegex = /"(?:t|q|a|goal|takeaway)"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"?/gi;
+  const extractedPieces: string[] = [];
+  let match: RegExpExecArray | null;
+
+  while ((match = stringValRegex.exec(rawStream)) !== null) {
+    if (match[1] && match[1].trim().length > 3) {
+      const unescaped = match[1].replace(/\\n/g, "\n").replace(/\\"/g, '"');
+      if (!extractedPieces.includes(unescaped)) {
+        extractedPieces.push(unescaped);
+      }
+    }
+  }
+
+  if (extractedPieces.length > 0) {
+    return extractedPieces.join("\n\n");
+  }
+
+  return rawStream
+    .replace(/[{}\[\]"]/g, "")
+    .replace(/\b(goal|terms|blocks|takeaway|digest|k|t|v|items|title|head|rows|q|a|code|lang|info|warn|mistake)\s*:/gi, "")
+    .replace(/,\\s*/g, "\n")
+    .trim();
+}
+
 export const CourseDetail: React.FC<CourseDetailProps> = ({ slug, currentLang, navigate, setLang, onToast }) => {
   const [course, setCourse] = useState<Course | null>(null);
   const [loading, setLoading] = useState(true);
@@ -198,6 +269,7 @@ export const CourseDetail: React.FC<CourseDetailProps> = ({ slug, currentLang, n
       const brain = getBrain(slug);
       rehydrate(brain, covered, usedTerms, course.glossary, course.masterSummary);
 
+      let accumulatedJson = "";
       const result = await CourseAI.generateLessonStream(
         course.title || course.topic,
         course.topic,
@@ -206,7 +278,9 @@ export const CourseDetail: React.FC<CourseDetailProps> = ({ slug, currentLang, n
         personal,
         course.lang || currentLang,
         (chunk) => {
-          setLiveContent((prev) => prev + chunk);
+          accumulatedJson += chunk;
+          const cleanText = cleanStreamPreview(accumulatedJson, isAr);
+          setLiveContent(cleanText);
         },
         (thoughtChunk) => {
           setLiveThought((prev) => prev + thoughtChunk);
