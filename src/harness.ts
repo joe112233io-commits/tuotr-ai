@@ -108,7 +108,18 @@ export function arabicRatio(text: string): number {
   return arabicLetters ? arabicLetters.length / allLetters.length : 0;
 }
 
-export function shingles(text: string, size = 5): Set<string> {
+export function normalizeTerm(text: string): string {
+  return String(text || "")
+    .toLowerCase()
+    .trim()
+    .replace(/[\u064B-\u065F\u0670]/g, "") // remove arabic tashkeel
+    .replace(/[أإآء]/g, "ا")
+    .replace(/ة$/g, "ه")
+    .replace(/^(ال)/, "")
+    .replace(/[^\p{L}\p{N}]/gu, "");
+}
+
+export function shingles(text: string, size = 4): Set<string> {
   const words = String(text || "")
     .toLowerCase()
     .replace(/[^\p{L}\p{N}\s]/gu, " ")
@@ -127,14 +138,27 @@ export function shingles(text: string, size = 5): Set<string> {
 }
 
 export function overlapRatio(a: string, b: string): number {
-  const sA = shingles(a, 5);
-  const sB = shingles(b, 5);
+  const sA = shingles(a, 4);
+  const sB = shingles(b, 4);
   if (sA.size === 0 || sB.size === 0) return 0;
   let matches = 0;
   for (const item of sA) {
     if (sB.has(item)) matches++;
   }
-  return matches / Math.min(sA.size, sB.size);
+  // Measures fraction of evaluated text 'a' that duplicates text from 'b'
+  return matches / sA.size;
+}
+
+export function digestQuotationRatio(newText: string, prevDigest: string): number {
+  const sNew = shingles(newText, 4);
+  const sDig = shingles(prevDigest, 4);
+  if (sNew.size === 0 || sDig.size === 0) return 0;
+  let matches = 0;
+  for (const item of sDig) {
+    if (sNew.has(item)) matches++;
+  }
+  // Measures what fraction of the previous digest is quoted verbatim
+  return matches / sDig.size;
 }
 
 const FILLER_PHRASES = [
@@ -424,16 +448,68 @@ export function validateLesson(
     }
   }
 
-  // Terminology Lock Check
-  const terms = Array.isArray(raw.terms) ? raw.terms.map((t: any) => String(t).trim()) : [];
-  if (ctx.glossary && ctx.glossary.length > 0 && terms.length > 0) {
-    const glossaryLookup = new Set(
-      ctx.glossary.map((g) => g.term.toLowerCase().trim().replace(/^(ال)/, ""))
-    );
+  // Terminology Lock Check (Bidirectional & Mandatory)
+  if (!Array.isArray(raw.terms)) {
+    errors.push("Lesson 'terms' is mandatory and must be an array of glossary terms.");
+  } else if (raw.terms.length === 0) {
+    errors.push("Lesson must declare at least the glossary terms it uses; an empty terms array is not acceptable.");
+  }
+
+  const terms = Array.isArray(raw.terms)
+    ? raw.terms.map((t: any) => String(t).trim()).filter(Boolean)
+    : [];
+
+  if (ctx.glossary && ctx.glossary.length > 0) {
+    const glossaryMap = new Map<string, Term>();
+    ctx.glossary.forEach((g) => {
+      glossaryMap.set(normalizeTerm(g.term), g);
+    });
+
+    // 1. Forward Check: All declared terms must exist in the glossary
     for (const userTerm of terms) {
-      const norm = userTerm.toLowerCase().trim().replace(/^(ال)/, "");
-      if (!glossaryLookup.has(norm)) {
+      const norm = normalizeTerm(userTerm);
+      if (!glossaryMap.has(norm)) {
         errors.push(`Term lock error: "${userTerm}" is not defined in the course glossary. Only use established course terms.`);
+      }
+    }
+
+    // 2. Reverse Check: Lesson body must reference established course vocabulary (at least 30%)
+    const cleanLessonText = fullTextAccumulator
+      .toLowerCase()
+      .replace(/[\u064B-\u065F\u0670]/g, "");
+
+    const lessonTokens = cleanLessonText
+      .replace(/[^\p{L}\p{N}\s]/gu, " ")
+      .split(/\s+/)
+      .map((w) => normalizeTerm(w))
+      .filter((w) => w.length > 1);
+    const tokenSet = new Set(lessonTokens);
+
+    let referencedCount = 0;
+    for (const g of ctx.glossary) {
+      const normG = normalizeTerm(g.term);
+      const rawG = g.term.toLowerCase();
+      if (
+        cleanLessonText.includes(rawG) ||
+        tokenSet.has(normG) ||
+        (normG.length > 2 && cleanLessonText.includes(normG))
+      ) {
+        referencedCount++;
+      }
+    }
+
+    const vocabRatio = ctx.glossary.length > 0 ? referencedCount / ctx.glossary.length : 1;
+    if (vocabRatio < 0.3) {
+      errors.push(
+        `Lesson barely references the established course vocabulary (${Math.round(vocabRatio * 100)}% < 30%). It must build on the course vocabulary and integrate established concepts.`
+      );
+    }
+
+    // 3. Ensure declared terms actually appear in the lesson content
+    for (const userTerm of terms) {
+      const norm = normalizeTerm(userTerm);
+      if (!cleanLessonText.includes(userTerm.toLowerCase()) && !tokenSet.has(norm)) {
+        errors.push(`Declared term "${userTerm}" is not referenced in the lesson body.`);
       }
     }
   }
@@ -441,9 +517,10 @@ export function validateLesson(
   // Duplication Check against Previous Lessons
   if (ctx.previous && ctx.previous.length > 0) {
     for (const prev of ctx.previous) {
-      const overlap = overlapRatio(fullTextAccumulator, prev.digest);
-      if (overlap > 0.12) {
-        errors.push(`Excessive overlap (${Math.round(overlap * 100)}% > 12%) with previous lesson "${prev.title}". Do not repeat prior content; cover new material.`);
+      const copyRatio = overlapRatio(fullTextAccumulator, prev.digest);
+      const digestCopyRatio = digestQuotationRatio(fullTextAccumulator, prev.digest);
+      if (copyRatio > 0.08 || digestCopyRatio > 0.5) {
+        errors.push(`Excessive overlap detected with previous lesson "${prev.title}". Do not repeat prior content; cover new material.`);
         break;
       }
     }
@@ -463,7 +540,11 @@ export function validateLesson(
   };
 }
 
-export function validateQuiz(raw: any, lang: string): { valid: boolean; errors: string[]; items?: QuizItem[] } {
+export function validateQuiz(
+  raw: any,
+  lang: string,
+  lessonContent?: string
+): { valid: boolean; errors: string[]; items?: QuizItem[] } {
   const errors: string[] = [];
   const list = Array.isArray(raw) ? raw : Array.isArray(raw?.questions) ? raw.questions : null;
   if (!list) {
@@ -504,7 +585,30 @@ export function validateQuiz(raw: any, lang: string): { valid: boolean; errors: 
     if (why.length < 10) errors.push(`Question #${idx + 1} 'why' explanation is too short (< 10 chars).`);
 
     const evidence = String(item?.evidence || "").trim();
-    if (evidence.length < 10) errors.push(`Question #${idx + 1} 'evidence' quote is missing or too short (< 10 chars).`);
+    if (evidence.length < 10) {
+      errors.push(`Question #${idx + 1} 'evidence' quote is missing or too short (< 10 chars).`);
+    } else if (lessonContent && lessonContent.trim().length > 0) {
+      const cleanContent = lessonContent
+        .toLowerCase()
+        .replace(/[\u064B-\u065F\u0670]/g, "")
+        .replace(/\s+/g, " ");
+      const cleanEvidence = evidence
+        .toLowerCase()
+        .replace(/[\u064B-\u065F\u0670]/g, "")
+        .replace(/^["'«»“]|["'«»”]$/g, "")
+        .replace(/\s+/g, " ")
+        .trim();
+
+      if (!cleanContent.includes(cleanEvidence)) {
+        const words = cleanEvidence.split(" ").filter((w) => w.length > 2);
+        const matchCount = words.filter((w) => cleanContent.includes(w)).length;
+        if (words.length > 0 && matchCount / words.length < 0.6) {
+          errors.push(
+            `Question #${idx + 1} evidence quote was not found in the lesson content. Every question must be grounded in actual lesson text.`
+          );
+        }
+      }
+    }
 
     items.push({
       q,
@@ -972,6 +1076,8 @@ STRICT QUALITY RULES:
 3. Total list items across lists must be at least 4. Every list item must be a complete explanation sentence (>= 4 words).
 4. NO FILLER PHRASES ("في عالم اليوم", "as we all know", etc.).
 5. If language is Arabic, all text, headings, and tables must be in clear Arabic.
+6. The "terms" field is strictly MANDATORY and must NOT be empty. Pick 2 to 5 applicable terms from the established glossary.
+7. The lesson text MUST actively weave in, explain, and reference the established course vocabulary (at least 30% of the terms in the glossary).
 ${correctionNote || ""}
 `,
     (raw) =>
@@ -1019,9 +1125,10 @@ Output ONLY a JSON array with 3 to 5 questions strictly matching this schema:
 RULES:
 - Every question must be directly testable from the text above.
 - Vary the correct answer index across questions (DO NOT make every correct answer 0 or 1).
+- Every "evidence" string MUST be an exact quote or direct excerpt from the lesson content above.
 ${correctionNote || ""}
 `,
-    (raw) => validateQuiz(raw, lang),
+    (raw) => validateQuiz(raw, lang, lessonEvidence),
     2,
     0.2
   );
