@@ -112,7 +112,7 @@ export const STR = {
     dir: "rtl", langName: "عربي", otherLang: "EN",
     navCreate: "إنشاء دورة", navPricing: "الأسعار", navLibrary: "المكتبة", navContact: "تواصل", navSettings: "الإعدادات",
     signIn: "تسجيل الدخول", newCourse: "+ دورة جديدة", menu: "القائمة",
-    heroA: "تدريس ذكي من المستوى التالي", heroB: "للمتعلمين مدى الحياة",
+    heroA: "تعليم ذكي بمستوى متقدم", heroB: "للمتعلمين مدى الحياة",
     heroSub: "أنشئ مسار تعلم مخصصاً يساعدك على تحقيق المزيد في الدراسة والعمل والحياة.",
     searchPh: "اكتب أي موضوع لإنشاء دورة مخصصة...",
     createCourseBtn: "✦ إنشاء دورة", popular: "دورات شائعة:",

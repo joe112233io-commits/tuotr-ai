@@ -114,7 +114,10 @@ async function startServer() {
       }
 
       try {
-        const cleanBase = String(customBaseUrl).trim().replace(/\/+$/, "");
+        let cleanBase = String(customBaseUrl).trim().replace(/\/+$/, "");
+
+        // Auto-fix if user appended '/chat/completions' or '/messages' to Base URL
+        cleanBase = cleanBase.replace(/\/chat\/completions$/, "").replace(/\/messages$/, "");
 
         if (providerType === "anthropic") {
           const headers: Record<string, string> = {
@@ -136,7 +139,17 @@ async function startServer() {
             }),
           });
 
-          const data: any = await resp.json();
+          const rawText = await resp.text();
+          let data: any = {};
+          try {
+            data = JSON.parse(rawText);
+          } catch (pErr) {
+            res.status(resp.status || 502).json({
+              error: `Provider returned non-JSON response (HTTP ${resp.status}). Ensure your Base URL is correct: ${rawText.slice(0, 100)}`
+            });
+            return;
+          }
+
           if (!resp.ok) {
             res.status(resp.status || 502).json({ error: data.error?.message || `Anthropic HTTP ${resp.status}` });
             return;
@@ -164,7 +177,17 @@ async function startServer() {
             }),
           });
 
-          const data: any = await resp.json();
+          const rawText = await resp.text();
+          let data: any = {};
+          try {
+            data = JSON.parse(rawText);
+          } catch (pErr) {
+            res.status(resp.status || 502).json({
+              error: `Provider returned non-JSON response (HTTP ${resp.status}). Ensure Base URL ends at /v1 without appending /chat/completions: ${rawText.slice(0, 100)}`
+            });
+            return;
+          }
+
           if (!resp.ok) {
             res.status(resp.status || 502).json({ error: data.error?.message || data.message || `Provider HTTP ${resp.status}` });
             return;
